@@ -42,11 +42,6 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-if [ -z "$1" ]; then
-    echo -e "Usage: $0 \$VERSION.\n\terror: version number required"
-    exit 1
-fi
-
 cd "$(dirname "$0")"
 
 ROOT=$(pwd)
@@ -59,13 +54,9 @@ fi
 
 VARIANT_TYPE=${VARIANT_TYPE:-}
 
-VERSION=$1
-
-if [[ $VERSION = 'main' ]]; then
-  echo -e "${GREEN}not release from a tag push, $0 will get versions from code${NC}"
-  # get version number from code
-  VERSION=$($MAVEN_EXE $MAVEN_FLAGS help:evaluate -Dexpression=project.version -q -DforceStdout)
-fi
+echo -e "${GREEN}not release from a tag push, $0 will get versions from code${NC}"
+# get version number from code
+VERSION=$($MAVEN_EXE $MAVEN_FLAGS help:evaluate -Dexpression=project.version -q -DforceStdout)
 # rm semVer number from VERSION of 3 numbers MAJOR.MINOR.PATCH
 #  0.1.2 -> ''
 #  0.1.2-SNAPSHOT -> '-SNAPSHOT'
@@ -75,12 +66,19 @@ fi
 SUFFIX_VERSION=$(echo "$VERSION" | sed -e 's/^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*//')
 # shellcheck disable=SC2001
 DEBUG_SUFFIX_VERSION=$(echo "$SUFFIX_VERSION" | sed -e 's/\.[0-9][0-9]*//')
+if [ -n "$DEBUG_SUFFIX_VERSION" ]; then
+  # retry with -hotfix suffix
+  # shellcheck disable=SC2001
+  DEBUG_SUFFIX_VERSION=$(echo "$SUFFIX_VERSION" | sed -e 's/-hotfix[0-9][0-9]*//')
+fi
 # get BASE VERSION by rm suffix version
 if [[ "$DEBUG_SUFFIX_VERSION" != "$SUFFIX_VERSION" ]] ; then
   DEBUG_NO=${SUFFIX_VERSION%"$DEBUG_SUFFIX_VERSION"}
 fi
 
 BASE_VERSION=${VERSION%"$SUFFIX_VERSION"}
+
+SUFFIX_VERSION=$DEBUG_SUFFIX_VERSION
 if [[ -n $SUFFIX_VERSION ]] ; then
     SUFFIX_VERSION=-SNAPSHOT
 fi
