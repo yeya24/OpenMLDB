@@ -1,6 +1,6 @@
 # Configuration File
 
-## The Configuration File for Nameserver: conf/nameserver.flags
+## Nameserver Configuration File - conf/nameserver.flags
 
 ```
 # nameserver.conf
@@ -9,6 +9,8 @@
 # If you are deploying the standalone version, you do not need to configure zk_cluster and zk_root_path, just comment these two configurations. Deploying the cluster version needs to configure these two items, and the two configurations of all nodes in a cluster must be consistent
 #--zk_cluster=127.0.0.1:7181
 #--zk_root_path=/openmldb_cluster
+# set the username and password of zookeeper if authentication is enabled
+#--zk_cert=user:passwd
 # The address of the tablet needs to be specified in the standalone version, and this configuration can be ignored in the cluster version
 --tablet=127.0.0.1:9921
 # Configure log directory
@@ -22,11 +24,11 @@
 #--request_max_retry=3
 # Configure the request timeout in milliseconds, the default is 12 seconds
 #--request_timeout_ms=12000
-# Configure the retry interval when the request is unreachable, generally do not need to be modified, in milliseconds
+# Configure the retry interval when the request is unreachable, generally does not need to be modified, in milliseconds
 #--request_sleep_time=1000
 # Configure the zookeeper session timeout in milliseconds
 --zk_session_timeout=10000
-# Configure the zookeeper health check interval, the unit is milliseconds, generally do not need to be modified
+# Configure the zookeeper health check interval, the unit is milliseconds, generally does not need to be modified
 #--zk_keep_alive_check_interval=15000
 # Configure the timeout period for tablet heartbeat detection in milliseconds, the default is 1 minute. If the tablet is still unreachable after this time, the nameserver considers that the tablet is unavailable and will perform the operation of offline the node
 --tablet_heartbeat_timeout=60000
@@ -60,7 +62,7 @@
 --system_table_replica_num=2
 ```
 
-## The Configuration File for conf/tablet.flags
+## Tablet Configuration File - conf/tablet.flags
 
 ```
 # tablet.conf
@@ -76,6 +78,8 @@
 # If you start the cluster version, you need to specify the address of zk and the node path of the cluster in zk
 #--zk_cluster=127.0.0.1:7181
 #--zk_root_path=/openmldb_cluster
+# set the username and password of zookeeper if authentication is enabled
+#--zk_cert=user:passwd
 
 # Configure the thread pool size, it is recommended to be consistent with the number of CPU cores
 --thread_pool_size=24
@@ -86,6 +90,9 @@
 
 # log file path
 --openmldb_log_dir=./logs
+
+# Specify the max memory usage of tablet. If memory usage exceeds the value, write will fail. The default value 0 means unlimited
+#--max_memory_mb=0
 
 # binlog conf
 # Binlog wait time when no new data is added, in milliseconds
@@ -113,10 +120,27 @@
 #--io_pool_size=2
 # The thread pool size for tasks such as deleting tables, sending snapshots, load snapshots, etc.
 #--task_pool_size=8
+# Configure whether to put the table drop data in the recycle directory, the default is true
+#--recycle_bin_enabled=true
+# Configure the storage time of data in the recycle directory. If this time is exceeded, the corresponding directory and data will be deleted. The default is 0 means never delete, the unit is minutes
+#--recycle_ttl=0
+
 # Configure the data directory, multiple disks are separated by commas
 --db_root_path=./db
 # Configure the data recycle bin directory, the data of the drop table will be placed here
 --recycle_bin_root_path=./recycle
+#
+#Configure HDD table data file path (optional, default is empty), use English commas for multiple disks
+--hdd_root_path=./db_hdd
+#Configure the recycle bin directory, use English commas for multiple disks
+--recycle_bin_hdd_root_path=./recycle_hdd
+#
+#Configure the SSD table data file path (optional, default is empty), use English commas for multiple disks
+--ssd_root_path=./db_ssd
+#Configure the data recycle bin directory, where the data of the drop table will be placed
+--recycle_bin_ssd_root_path=./recycle_ssd
+# Configure whether to enable recycle
+#--recycle_bin_enabled=true
 
 # snapshot conf
 # Configure the time to do snapshots, the time of day. For example, 23 means taking a snapshot at 23 o'clock every day.
@@ -158,6 +182,14 @@
 # The maximum height of the second level skip list
 #--key_entry_max_height=8
 
+# query conf
+# max table traverse iteration(full table scan/aggregation),default: 0
+#--max_traverse_cnt=0
+# max table traverse unique key number(batch query), default: 0
+#--max_traverse_key_cnt=0
+# max result size in byte (default: 0 unlimited)
+#--scan_max_bytes_size=0
+
 # loadtable
 # The number of data bars to submit a task to the thread pool when loading
 #--load_table_batch=30
@@ -165,9 +197,19 @@
 #--load_table_thread_num=3
 # The maximum queue length of the load thread pool
 #--load_table_queue_size=1000
+
+# for rocksdb
+#--disable_wal=true
+# Type of compression, can be off, pz, lz4, zlib
+#--file_compression=off
+#--block_cache_mb=4096
+#--block_cache_shardbits=8
+#--verify_compression=false
+#--max_log_file_size=100 * 1024 * 1024
+#--keep_log_file_num=5
 ```
 
-## The Configuration file for APIServer: conf/tablet.flags
+## APIServer Configuration File - conf/apiserver.flags
 
 ```
 # apiserver.conf
@@ -180,6 +222,8 @@
 # If the deployed openmldb is a cluster version, you need to specify the zk address and the cluster zk node directory
 #--zk_cluster=127.0.0.1:7181
 #--zk_root_path=/openmldb_cluster
+# set the username and password of zookeeper if authentication is enabled
+#--zk_cert=user:passwd
 
 # configure log path
 --openmldb_log_dir=./logs
@@ -188,7 +232,7 @@
 #--thread_pool_size=16
 ```
 
-## he Configuration file for TaskManager: conf/taskmanager.properties
+## TaskManager Configuration File - conf/taskmanager.properties
 
 ```
 # Server Config
@@ -211,19 +255,100 @@ zookeeper.connection_timeout=5000
 zookeeper.max_retries=10
 zookeeper.base_sleep_time=1000
 zookeeper.max_connect_waitTime=30000
+#zookeeper.cert=user:passwd
 
 # Spark Config
 spark.home=
-spark.master=local
+spark.master=local[*]
 spark.yarn.jars=
 spark.default.conf=
 spark.eventLog.dir=
 spark.yarn.maxAppAttempts=1
 batchjob.jar.path=
-namenode.uri=
 offline.data.prefix=file:///tmp/openmldb_offline_storage/
 hadoop.conf.dir=
+#enable.hive.support=false
 ```
 
-* If configuration of `spark.home` is not set，please set the environment variable of `SPARK_HOME` in TaskManager server.
-* The default value of configruation `spark.master` is `local`. We can set `local[*]`, `yarn`, `yarn-cluster` or `yarn-client` as well. If we are using Yarn mode, please set configuration `offline.data.prefix` as the HDFS path to avoid saving offline data in local filesystem of Yarn containers. Meanwhile we need to set environment variable of `HADOOP_CONF_DIR` as the directory of Hadoop configuration files.
+### Details on Spark Config
+
+Some of the important configurations for Spark Config is as follows:
+
+<a id="about-config-env"></a>
+```{note}
+Understand the relationships between configurations and environment variables.
+
+TaskManager will start a Spark process with SparkSubmit, therefore the environment variables cannot be automatically set. For example, before version 0.8.2, in order for Spark process to access HADOOP and connect to YARN cluster, the environment variable `HADOOP_CONF_DIR` needs to be set. In later versions, the Hadoop configuration file location can be specified with configuration item `hadoop.conf.dir`. With this configuration, TaskManager will pass the respective environment variable to the Spark process. However, higher priority is given to `spark-env.sh` within Spark configuration. If this config is set, TaskManager will not be able to make further changes. Therefore, the priority goes as: spark-env.sh > TaskManager configuration > current environment variable `HADOOP_CONF_DIR`.
+
+`spark.home` is only used for TaskManager to identify the installation location for Spark. `hadoop.conf.dir`, `hadoop.user.name` will be passed to Spark process. If any other variables are required, modifications to code is required.
+```
+
+#### `spark.home`
+
+`spark.home` is the installation location, which is used by TaskManager for offline tasks. It is usually configured as the installation location for [OpenMLDB Spark distribution](../../tutorial/openmldbspark_distribution.md).
+
+If `spark.home` in TaskManager configuration file is not set, TaskManager will try to read the environment variable `SPARK_HOME`. If none is set, TaskManager will fail and prompt `spark.home` not set.
+
+With one-clock deployment, SPARK_HOME will be set as `<package_home>/spark`. For example, if `work/taskmanager` is deployed for host1, SPARK_HOME will be set as `/work/taskmanager/spark`. You can configure it in `openmldb-env.sh`. Please do not modify properties template files, and pay attention to `OPENMLDB envs:` during deployment.
+
+#### `spark.master`
+
+`spark.master` configures Spark modes, more information can be found at [Spark Master URL](https://spark.apache.org/docs/latest/submitting-applications.html#master-urls).
+
+TaskManager only allows `local` and its variants, `yarn`, `yarn-cluster` and `yarn-client` modes. Default mode is `local[*]`, which is milti-process local mode (thread count is cpu counts). Spark cluster `spark://`, Mesos cluster `mesos://` and Kubernetes `k8s://` cluster modes are currently not supported.
+
+##### `local` Mode
+
+The local mode means that the Spark task runs on the local machine (where the TaskManager is located). In this mode, not many configurations are required, but two points should be noted:
+- The storage location of offline tables `offline.data.prefix` is set to `file:///tmp/openmldb_offline_storage/` by default, which refers to the `/tmp` directory on the TaskManager's machine. If the TaskManager is moved to another machine, the data cannot be automatically migrated. It is not recommended to use `file://` when deploying multiple TaskManagers on different machines. You can configure it as an HDFS path, and you need to configure the variables `hadoop.conf.dir` and `hadoop.user.name`. For more details, see [Hadoop-related configurations](#hadoop-related-configurations).
+
+- The path of the batchjob `batchjob.jar.path` can be automatically obtained and does not need to be configured. If you want to use a batchjob from elsewhere, you can configure this parameter.
+
+```{seealso}
+If Hadoop/Yarn requires Kerberos authentication, refer to the [Client FAQ](../faq/client_faq.md).
+```
+
+##### `yarn/yarn-cluster` Mode
+"yarn" and "yarn-cluster" are the same mode, where Spark tasks run on a Yarn cluster. This mode requires several configurations, including:
+
+- The yarn mode must connect to a Hadoop cluster and requires the proper configuration of Hadoop variables `hadoop.conf.dir` and `hadoop.user.name`. For more details, refer to [Hadoop-related configurations](#hadoop-related-configurations).
+
+The following configurations usually require an HDFS that belongs to the same Hadoop cluster as Yarn, unless a direct `hdfs://` address can be used.
+
+- The `spark.yarn.jars` configuration specifies the location of Spark runtime JAR files that Yarn needs to read. It must be an `hdfs://` address. You can upload the `jars` directory from the [OpenMLDB Spark distribution](../../tutorial/openmldbspark_distribution.md) to HDFS and configure it as `hdfs://<hdfs_path>/jars/*` (note the wildcard). [If this parameter is not configured, Yarn will package and distribute `$SPARK_HOME/jars` for each offline task, which is inefficient](https://spark.apache.org/docs/3.2.1/running-on-yarn.html#preparations). Therefore, it is recommended to configure this parameter.
+- `batchjob.jar.path` must be an HDFS path (specific to the package name). Upload the batch job JAR file to HDFS and configure it with the corresponding address to ensure that all workers in the Yarn cluster can access the batch job package.
+- `offline.data.prefix` must be an HDFS path to ensure that all workers in the Yarn cluster can read and write data.
+
+##### `yarn-client` Mode
+
+[Driver executes locally](https://spark.apache.org/docs/3.2.1/running-on-yarn.html#launching-spark-on-yarn), and the executor executes on the Yarn cluster. Configurations are the same as `yarn-cluster`.
+
+#### spark.default.conf
+
+`spark.default.conf` configures Spark parameters in the format of `key=value`. Multiple configurations are separated by `;`, for example:
+
+#### Hadoop-related configurations
+
+`hadoop.conf.dir` and `hadoop.user.name` are configurations for TaskManager. They will be passed to the Spark Job when TaskManager submits the job, which is equivalent to configuring the environment variables `HADOOP_CONF_DIR` and `HADOOP_USER_NAME` before creating the Spark Job.
+
+Details of the configurations:
+
+- `hadoop.conf.dir` represents the directory where Hadoop and Yarn configuration files are located (note that this directory is on the TaskManager node; the file directory should include Hadoop's `core-site.xml`, `hdfs-site.xml`, `yarn-site.xml`, and other configuration files, refer to the [Spark official documentation](https://spark.apache.org/docs/3.2.1/running-on-yarn.html#launching-spark-on-yarn)).
+- `hadoop.user.name` represents the Hadoop user.
+
+Essentially, it configures environment variables, and the scope of their effect is explained in <a href="#about-config-env">Understanding the Relationship Between Configurations and Environment Variables</a>. If there are special requirements, it is possible to bypass the configuration in TaskManager and configure the environment variables in other ways. However, it is recommended not to mix the two methods and use only one method for easier debugging.
+
+Please note that unspecified variables cannot be passed in sbin deployment. Currently, TaskManager only receives the environment variables `SPARK_HOME` and `RUNNER_JAVA_HOME`. Therefore, if you are using sbin deployment, it is recommended to use the TaskManager configuration file.
+
+Other configuration methods:
+- Copy Hadoop and Yarn configuration files (`core-site.xml`, `hdfs-site.xml`, etc.) to the `{spark.home}/conf` directory.
+
+- If there are existing environment variables on the TaskManager node, or **before manually starting TaskManager**, configure the environment variables `HADOOP_CONF_DIR` and `HADOOP_USER_NAME`.
+  > Similar to the following steps:
+  > ```bash
+  > cd <openmldb installation directory>
+  > export HADOOP_CONF_DIR=<replace with the Hadoop configuration directory>
+  > export HADOOP_USER_NAME=<replace with the Hadoop username>
+  > bash bin/start.sh start taskmanager
+  > ```
+  > Note that SSH remote startup may lose environment variables, so it is recommended to export them correctly before starting.

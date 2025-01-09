@@ -16,7 +16,7 @@
 package com._4paradigm.openmldb.batch.nodes
 
 import com._4paradigm.hybridse.vm.PhysicalSelectIntoNode
-import com._4paradigm.openmldb.batch.utils.HybridseUtil
+import com._4paradigm.openmldb.batch.utils.{HybridseUtil, OpenmldbTableUtil, DataSourceUtil}
 import com._4paradigm.openmldb.batch.{PlanContext, SparkInstance}
 import org.slf4j.LoggerFactory
 
@@ -28,18 +28,51 @@ object SelectIntoPlan {
     require(outPath.nonEmpty)
 
     if (logger.isDebugEnabled()) {
+      logger.debug("session catalog {}", ctx.getSparkSession.sessionState.catalog)
       logger.debug("select {} rows", input.getDf().count())
       input.getDf().show(10)
     }
-
-    // write options don't need deepCopy
-    val (format, options, mode, _) = HybridseUtil.parseOptions(node)
-    logger.info("select into offline storage: format[{}], options[{}], write mode[{}], out path {}", format, options,
-      mode, outPath)
-    if (input.getDf().isEmpty) {
+    // write options don't need deepCopy, may have coalesce
+    val (format, options, mode, extra) = HybridseUtil.parseOptions(outPath, node)
+    if (input.getSchema.size == 0 && input.getDf().isEmpty) {
       throw new Exception("select empty, skip save")
+    }
+
+    if (DataSourceUtil.isCatalog(format)) {
+      // we won't check if the database exists, if not, save will throw exception
+      // Hive: DO NOT create database in here(the table location will be spark warehouse)
+      val dbt = DataSourceUtil.catalogDest(outPath)
+      logger.info(s"offline select into: $format catalog, write mode[${mode}], out table ${dbt}")
+      input.getDf().write.format(format).mode(mode).saveAsTable(dbt)
+    } else if (format == "openmldb") {
+
+      val (db, table) = HybridseUtil.getOpenmldbDbAndTable(outPath)
+
+      val createIfNotExists = extra.get("create_if_not_exists").get.toBoolean
+      if (createIfNotExists) {
+        logger.info("Try to create openmldb output table: " + table)
+
+        OpenmldbTableUtil.createOpenmldbTableFromDf(ctx.getOpenmldbSession, input.getDf(), db, table)
+      }
+
+      val writeOptions = Map(
+        "db" -> db,
+        "table" -> table,
+        "zkCluster" -> ctx.getConf.openmldbZkCluster,
+        "zkPath" -> ctx.getConf.openmldbZkRootPath)
+
+      input.getDf().write.options(writeOptions).format("openmldb").mode(mode).save()
+
     } else {
-      input.getDf().write.format(format).options(options).mode(mode).save(outPath)
+      logger.info("offline select into: format[{}], options[{}], write mode[{}], out path {}", format, options,
+        mode, outPath)
+      var ds = input.getDf()
+      val coalesce = extra.get("coalesce").map(_.toInt)
+      if (coalesce.nonEmpty && coalesce.get > 0) {
+        ds = ds.coalesce(coalesce.get)
+        logger.info("coalesce to {} part", coalesce.get)
+      }
+      ds.write.format(format).options(options).mode(mode).save(outPath)
     }
 
     SparkInstance.fromDataFrame(ctx.getSparkSession.emptyDataFrame)

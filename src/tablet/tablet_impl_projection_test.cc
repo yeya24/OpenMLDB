@@ -21,7 +21,6 @@
 #include <sys/stat.h>
 
 #include "base/file_util.h"
-#include "base/glog_wapper.h"
 #include "base/kv_iterator.h"
 #include "base/strings.h"
 #include "brpc/channel.h"
@@ -29,20 +28,11 @@
 #include "codec/schema_codec.h"
 #include "common/timer.h"
 #include "gtest/gtest.h"
-#include "log/log_reader.h"
-#include "log/log_writer.h"
 #include "proto/tablet.pb.h"
 #include "storage/mem_table.h"
-#include "storage/ticket.h"
 #include "tablet/tablet_impl.h"
-#include "vm/engine.h"
+#include "test/util.h"
 
-DECLARE_string(db_root_path);
-DECLARE_string(ssd_root_path);
-DECLARE_string(hdd_root_path);
-DECLARE_string(recycle_bin_root_path);
-DECLARE_string(recycle_bin_ssd_root_path);
-DECLARE_string(recycle_bin_hdd_root_path);
 DECLARE_string(zk_cluster);
 DECLARE_string(zk_root_path);
 DECLARE_int32(gc_interval);
@@ -75,31 +65,6 @@ struct TestArgs {
     ::openmldb::common::TTLSt ttl_desc;
     TestArgs() : schema(), plist(), output_schema() {}
     ~TestArgs() {}
-};
-
-class DiskTestEnvironment : public ::testing::Environment{
-    virtual void SetUp() {
-        std::vector<std::string> file_path;
-        ::openmldb::base::SplitString(FLAGS_hdd_root_path, ",", file_path);
-        for (uint32_t i = 0; i < file_path.size(); i++) {
-            ::openmldb::base::RemoveDirRecursive(file_path[i]);
-        }
-        ::openmldb::base::SplitString(FLAGS_recycle_bin_hdd_root_path, ",", file_path);
-        for (uint32_t i = 0; i < file_path.size(); i++) {
-            ::openmldb::base::RemoveDirRecursive(file_path[i]);
-        }
-    }
-    virtual void TearDown() {
-        std::vector<std::string> file_path;
-        ::openmldb::base::SplitString(FLAGS_hdd_root_path, ",", file_path);
-        for (uint32_t i = 0; i < file_path.size(); i++) {
-            ::openmldb::base::RemoveDirRecursive(file_path[i]);
-        }
-        ::openmldb::base::SplitString(FLAGS_recycle_bin_hdd_root_path, ",", file_path);
-        for (uint32_t i = 0; i < file_path.size(); i++) {
-            ::openmldb::base::RemoveDirRecursive(file_path[i]);
-        }
-    }
 };
 
 class TabletProjectTest : public ::testing::TestWithParam<TestArgs*> {
@@ -510,7 +475,6 @@ TEST_P(TabletProjectTest, get_case) {
         table_meta->set_seg_cnt(8);
         table_meta->set_mode(::openmldb::api::TableMode::kTableLeader);
         table_meta->set_key_entry_max_height(8);
-        table_meta->set_format_version(1);
         table_meta->set_storage_mode(args->storage_mode);
         Schema* schema = table_meta->mutable_column_desc();
         schema->CopyFrom(args->schema);
@@ -525,7 +489,6 @@ TEST_P(TabletProjectTest, get_case) {
         ::openmldb::api::PutRequest request;
         request.set_tid(tid);
         request.set_pid(0);
-        request.set_format_version(1);
         ::openmldb::api::Dimension* dim = request.add_dimensions();
         dim->set_idx(0);
         std::string key = args->pk;
@@ -574,7 +537,6 @@ TEST_P(TabletProjectTest, sql_case) {
         table_meta->set_mode(::openmldb::api::TableMode::kTableLeader);
         table_meta->set_key_entry_max_height(8);
         table_meta->set_storage_mode(args->storage_mode);
-        table_meta->set_format_version(1);
         Schema* schema = table_meta->mutable_column_desc();
         schema->CopyFrom(args->schema);
         ::openmldb::common::ColumnKey* ck = table_meta->add_column_key();
@@ -588,7 +550,6 @@ TEST_P(TabletProjectTest, sql_case) {
         ::openmldb::api::PutRequest request;
         request.set_tid(tid);
         request.set_pid(0);
-        request.set_format_version(1);
         ::openmldb::api::Dimension* dim = request.add_dimensions();
         dim->set_idx(0);
         std::string key = args->pk;
@@ -629,7 +590,6 @@ TEST_P(TabletProjectTest, scan_case) {
         table_meta->set_seg_cnt(8);
         table_meta->set_mode(::openmldb::api::TableMode::kTableLeader);
         table_meta->set_key_entry_max_height(8);
-        table_meta->set_format_version(1);
         table_meta->set_storage_mode(args->storage_mode);
         Schema* schema = table_meta->mutable_column_desc();
         schema->CopyFrom(args->schema);
@@ -644,7 +604,6 @@ TEST_P(TabletProjectTest, scan_case) {
         ::openmldb::api::PutRequest request;
         request.set_tid(tid);
         request.set_pid(0);
-        request.set_format_version(1);
         ::openmldb::api::Dimension* dim = request.add_dimensions();
         dim->set_idx(0);
         std::string key = args->pk;
@@ -685,15 +644,9 @@ INSTANTIATE_TEST_SUITE_P(TabletProjectPrefix, TabletProjectTest, testing::Values
 }  // namespace openmldb
 
 int main(int argc, char** argv) {
-    ::testing::AddGlobalTestEnvironment(new ::openmldb::tablet::DiskTestEnvironment);
     ::testing::InitGoogleTest(&argc, argv);
+    ::openmldb::test::InitRandomDiskFlags("tablet_impl_projection_test");
     srand(time(NULL));
-    std::string k1 = ::openmldb::tablet::GenRand();
-    std::string k2 = ::openmldb::tablet::GenRand();
-    FLAGS_db_root_path = "/tmp/db" + k1 + ",/tmp/db" + k2;
-    FLAGS_hdd_root_path = "/tmp/hdd/db" + k1 + ",/tmp/hdd/db" + k2;
-    FLAGS_recycle_bin_root_path = "/tmp/recycle" + k1 + ",/tmp/recycle" + k2;
-    FLAGS_recycle_bin_hdd_root_path = "/tmp/hdd/recycle" + k1 + ",/tmp/hdd/recycle" + k2;
     ::hybridse::vm::Engine::InitializeGlobalLLVM();
     return RUN_ALL_TESTS();
 }

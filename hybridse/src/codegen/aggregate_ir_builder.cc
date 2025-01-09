@@ -15,34 +15,39 @@
  */
 #include "codegen/aggregate_ir_builder.h"
 
-#include <stdlib.h>
 #include <algorithm>
 #include <limits>
 #include <map>
 #include <memory>
 
+#include "absl/container/flat_hash_set.h"
+#include "codegen/buf_ir_builder.h"
 #include "codegen/expr_ir_builder.h"
 #include "codegen/ir_base_builder.h"
 #include "codegen/variable_ir_builder.h"
-#include "gflags/gflags.h"
 #include "glog/logging.h"
+#include "node/node_manager.h"
+
 namespace hybridse {
 namespace codegen {
 
-AggregateIRBuilder::AggregateIRBuilder(const vm::SchemasContext* sc,
-                                       ::llvm::Module* module,
-                                       const node::FrameNode* frame_node,
-                                       uint32_t id)
-    : schema_context_(sc), module_(module), frame_node_(frame_node), id_(id) {
-    available_agg_func_set_.insert("sum");
-    available_agg_func_set_.insert("avg");
-    available_agg_func_set_.insert("count");
-    available_agg_func_set_.insert("min");
-    available_agg_func_set_.insert("max");
+static auto CreateAggFuncMap() {
+    absl::flat_hash_set<absl::string_view> res = {"sum", "avg", "count", "min", "max"};
+    return res;
 }
 
-bool AggregateIRBuilder::IsAggFuncName(const std::string& fname) {
-    return available_agg_func_set_.find(fname) != available_agg_func_set_.end();
+static auto& GetAggFuncMap() {
+    static const absl::flat_hash_set<absl::string_view>& res = *new auto(CreateAggFuncMap());
+    return res;
+}
+
+AggregateIRBuilder::AggregateIRBuilder(const vm::SchemasContext* sc, ::llvm::Module* module,
+                                       const node::FrameNode* frame_node, uint32_t id)
+    : schema_context_(sc), module_(module), frame_node_(frame_node), id_(id) {}
+
+bool AggregateIRBuilder::IsAggFuncName(absl::string_view fname) const {
+    auto& map = GetAggFuncMap();
+    return map.find(fname) != map.end();
 }
 
 bool AggregateIRBuilder::CollectAggColumn(const hybridse::node::ExprNode* expr,
@@ -90,24 +95,26 @@ bool AggregateIRBuilder::CollectAggColumn(const hybridse::node::ExprNode* expr,
             Status status = schema_context_->ResolveColumnRefIndex(
                 col, &schema_idx, &col_idx);
             if (!status.isOK()) {
-                DLOG(ERROR) << status.msg;
+                DLOG(ERROR) << status;
                 return false;
             }
-            const codec::ColInfo& col_info =
-                *schema_context_->GetRowFormat()
-                     ->GetColumnInfo(schema_idx, col_idx);
-            auto col_type = col_info.type;
+            const codec::ColInfo& col_info = *schema_context_->GetRowFormat()->GetColumnInfo(schema_idx, col_idx);
             uint32_t offset = col_info.offset;
 
             // resolve llvm agg type
-            node::DataType node_type;
-            if (!SchemaType2DataType(col_type, &node_type)) {
-                LOG(ERROR) << "unrecognized data type "
-                           << hybridse::type::Type_Name(col_type);
+            node::NodeManager nm;
+            auto s = ColumnSchema2Type(col_info.schema, &nm);
+            if (!s.ok()) {
+                // legacy udf resolve context, this only happens for base types
+                LOG(ERROR) << s.status();
                 return false;
             }
-            if (GetOutputLlvmType(module_->getContext(), agg_func_name,
-                                  node_type) == nullptr) {
+            auto* type = s.value();
+            if (!type->IsBaseType()) {
+                LOG(INFO) << "skip CollectAggColumn for non-base types";
+                return false;
+            }
+            if (GetOutputLlvmType(module_->getContext(), agg_func_name, type->base()) == nullptr) {
                 return false;
             }
             if (agg_func_name == "count") {
@@ -115,11 +122,11 @@ bool AggregateIRBuilder::CollectAggColumn(const hybridse::node::ExprNode* expr,
             } else if (agg_func_name == "avg") {
                 *res_agg_type = ::hybridse::type::kDouble;
             } else {
-                *res_agg_type = col_type;
+                *res_agg_type = col_info.schema.base_type();
             }
 
             std::string col_key = absl::StrCat(rel_name, ".", col_name);
-            auto res = agg_col_infos_.try_emplace(col_key, col, node_type, schema_idx, col_idx, offset);
+            auto res = agg_col_infos_.try_emplace(col_key, col, type->base(), schema_idx, col_idx, offset);
             res.first->second.AddAgg(agg_func_name, output_idx);
             return true;
         }
@@ -434,9 +441,14 @@ class StatisticalAggGenerator {
     std::vector<::llvm::Value*> count_state_;
 };
 
-llvm::Type* AggregateIRBuilder::GetOutputLlvmType(
-    ::llvm::LLVMContext& llvm_ctx, const std::string& fname,
-    const node::DataType& node_type) {
+llvm::Type* AggregateIRBuilder::GetOutputLlvmType(::llvm::LLVMContext& llvm_ctx, const std::string& fname,
+                                                  const node::DataType& node_type) {
+    if (fname == "count") {
+        return ::llvm::Type::getInt64Ty(llvm_ctx);
+    } else if (fname == "avg") {
+        return ::llvm::Type::getDoubleTy(llvm_ctx);
+    }
+
     ::llvm::Type* llvm_ty = nullptr;
     switch (node_type) {
         case ::hybridse::node::kInt16:
@@ -458,11 +470,6 @@ llvm::Type* AggregateIRBuilder::GetOutputLlvmType(
             LOG(ERROR) << "Unknown data type: " << DataTypeName(node_type);
             return nullptr;
         }
-    }
-    if (fname == "count") {
-        return ::llvm::Type::getInt64Ty(llvm_ctx);
-    } else if (fname == "avg") {
-        return ::llvm::Type::getDoubleTy(llvm_ctx);
     }
     return llvm_ty;
 }
@@ -563,13 +570,14 @@ base::Status ScheduleAggGenerators(
 }
 
 base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
-                                    ExprIRBuilder* expr_ir_builder,
-                                    VariableIRBuilder* variable_ir_builder,
-                                    ::llvm::BasicBlock* cur_block,
-                                    const std::string& output_ptr_name,
-                                    const vm::Schema& output_schema) {
+                                            ExprIRBuilder* expr_ir_builder,
+                                            VariableIRBuilder* variable_ir_builder,
+                                            ::llvm::BasicBlock* cur_block,
+                                            const std::string& output_ptr_name,
+                                            const vm::Schema& output_schema) {
     ::llvm::LLVMContext& llvm_ctx = module_->getContext();
-    ::llvm::IRBuilder<> builder(llvm_ctx);
+    CodeGenContextBase ctx(module_);
+    auto& builder = *ctx.GetBuilder();
     auto void_ty = llvm::Type::getVoidTy(llvm_ctx);
     auto int64_ty = llvm::Type::getInt64Ty(llvm_ctx);
     expr_ir_builder->set_frame(nullptr, frame_node_);
@@ -589,7 +597,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
         llvm::Type::getVoidTy(llvm_ctx), {ptr_ty, ptr_ty}, false);
     ::llvm::Function* fn = ::llvm::Function::Create(
         fnt, llvm::Function::ExternalLinkage, fn_name, module_);
-    builder.SetInsertPoint(cur_block);
+    BlockGuard bg0(cur_block, &ctx);
     builder.CreateCall(
         module_->getOrInsertFunction(fn_name, fnt),
         {window_ptr.GetValue(&builder), builder.CreateLoad(output_buf)});
@@ -608,7 +616,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
                  "Schedule agg ops failed")
 
     // gen head
-    builder.SetInsertPoint(head_block);
+    BlockGuard bg1(head_block, &ctx);
     for (auto& agg_generator : generators) {
         agg_generator.GenInitState(&builder);
     }
@@ -627,7 +635,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
     builder.CreateBr(enter_block);
 
     // gen iter begin
-    builder.SetInsertPoint(enter_block);
+    BlockGuard bg2(enter_block, &ctx);
     auto bool_ty = llvm::Type::getInt1Ty(llvm_ctx);
     auto has_next_func = module_->getOrInsertFunction(
         "hybridse_storage_row_iter_has_next",
@@ -636,7 +644,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
     builder.CreateCondBr(has_next, body_block, exit_block);
 
     // gen iter body
-    builder.SetInsertPoint(body_block);
+    BlockGuard bg3(body_block, &ctx);
     auto get_slice_func = module_->getOrInsertFunction(
         "hybridse_storage_row_iter_get_cur_slice",
         ::llvm::FunctionType::get(ptr_ty, {ptr_ty, int64_ty}, false));
@@ -660,10 +668,12 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
         if (iter == used_slices.end()) {
             ::llvm::Value* idx_value =
                 llvm::ConstantInt::get(int64_ty, slice_idx, true);
-            ::llvm::Value* buf_ptr =
-                builder.CreateCall(get_slice_func, {iter_ptr, idx_value});
-            ::llvm::Value* buf_size =
-                builder.CreateCall(get_slice_size_func, {iter_ptr, idx_value});
+
+            // FIXME(ace): the two jit functions are deprecating
+            //
+            // It must be the order of GetSliceSize then GetSlice, or dangling reference happens
+            ::llvm::Value* buf_size = builder.CreateCall(get_slice_size_func, {iter_ptr, idx_value});
+            ::llvm::Value* buf_ptr = builder.CreateCall(get_slice_func, {iter_ptr, idx_value});
             used_slices[slice_idx] = {buf_ptr, buf_size};
         }
     }
@@ -684,9 +694,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
             auto& slice_info = used_slices[slice_idx];
 
             ScopeVar dummy_scope_var;
-            BufNativeIRBuilder buf_builder(
-                schema_idx, schema_context_->GetRowFormat(),
-                body_block, &dummy_scope_var);
+            BufNativeIRBuilder buf_builder(&ctx, schema_idx, schema_context_->GetRowFormat(), &dummy_scope_var);
             NativeValue field_value;
             CHECK_TRUE(buf_builder.BuildGetField(info.col_idx, slice_info.first, slice_info.second, &field_value),
                        common::kCodegenGetFieldError, "fail to gen fetch column")
@@ -714,7 +722,7 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
     builder.CreateBr(enter_block);
 
     // gen iter end
-    builder.SetInsertPoint(exit_block);
+    BlockGuard bg4(exit_block, &ctx);
     auto delete_iter_func = module_->getOrInsertFunction(
         "hybridse_storage_row_iter_delete",
         ::llvm::FunctionType::get(void_ty, {ptr_ty}, false));
@@ -722,14 +730,13 @@ base::Status AggregateIRBuilder::BuildMulti(const std::string& base_funcname,
 
     // store results to output row
     std::map<uint32_t, NativeValue> dummy_map;
-    BufNativeEncoderIRBuilder output_encoder(&dummy_map, &output_schema,
-                                             exit_block);
+    BufNativeEncoderIRBuilder output_encoder(&ctx, &dummy_map, &output_schema);
+    CHECK_STATUS(output_encoder.Init());
     for (auto& agg_generator : generators) {
         std::vector<std::pair<size_t, NativeValue>> outputs;
         agg_generator.GenOutputs(&builder, &outputs);
         for (auto pair : outputs) {
-            output_encoder.BuildEncodePrimaryField(output_arg, pair.first,
-                                                   pair.second);
+            CHECK_STATUS(output_encoder.BuildEncodePrimaryField(output_arg, pair.first, pair.second));
         }
     }
     builder.CreateRetVoid();

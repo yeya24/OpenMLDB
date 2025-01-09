@@ -17,15 +17,27 @@
 #include <gflags/gflags.h>
 // cluster config
 DEFINE_string(endpoint, "", "ip:port, config the ip and port that openmldb serves for");
-DEFINE_string(openmldb_log_dir, "./logs", "config the log dir");
+DEFINE_string(log_level, "debug", "Set the log level of servers, eg: debug or info, only for macro DEBUGLOG");
+DEFINE_int32(glog_level, 1, "set the glog level of CLI, default is WARN");
+DEFINE_string(glog_dir, "", "set the glog dir of CLI, default is empty, print to stdout");
+DEFINE_string(openmldb_log_dir, "./logs", "config the log dir of glog, for all log macro");
+DEFINE_int32(log_overdue_days, 0, "config the number of days to retain log files");
+DEFINE_string(role, "",
+              "Set the openmldb role for start: tablet | nameserver | client | ns_client | sql_client | apiserver");
+DEFINE_string(cmd, "", "the command str, DO NOT add multi sqls");
+DEFINE_string(user, "root", "specify the user");
+DEFINE_string(password, "", "config the password");
 DEFINE_int32(zk_session_timeout, 2000,
              "config the zk session timeout of cli in milliseconds, apiserver, tablet or nameserver");
 DEFINE_uint32(tablet_heartbeat_timeout, 5 * 60 * 1000, "config the heartbeat of tablet offline. unit is milliseconds");
 DEFINE_uint32(tablet_offline_check_interval, 1000, "config the check interval of tablet offline. unit is milliseconds");
 DEFINE_string(zk_cluster, "", "config the zookeeper cluster eg ip:2181,ip2:2181,ip3:2181");
 DEFINE_string(zk_root_path, "/openmldb", "config the root path of zookeeper");
+DEFINE_string(zk_auth_schema, "digest", "config the id of authentication schema");
+DEFINE_string(zk_cert, "", "config the application credentials");
 DEFINE_string(tablet, "", "config the endpoint of tablet");
 DEFINE_string(nameserver, "", "config the endpoint of nameserver");
+DEFINE_int32(get_sys_mem_interval, 10000, "config the interval of get system memory. unit is milliseconds");
 DEFINE_int32(zk_keep_alive_check_interval, 15000, "config the interval of keep alive check. unit is milliseconds");
 DEFINE_uint32(zk_log_level, 0,
               "CLI: set level integer, DISABLE_LOGGING=0, "
@@ -33,9 +45,12 @@ DEFINE_uint32(zk_log_level, 0,
 DEFINE_string(zk_log_file, "", "CLI: set zk log file, empty means stderr(default in zk)");
 DEFINE_string(host, "", "used in stand-alone mode, config the name server ip");
 DEFINE_int32(port, 0, "used in stand-alone mode, config the name server port");
+DEFINE_int32(request_timeout, 600000, "rpc request timeout of CLI, unit is milliseconds");
+
 DEFINE_int32(get_task_status_interval, 2000, "config the interval of get task status. unit is milliseconds");
 DEFINE_uint32(get_table_status_interval, 2000, "config the interval of get table status. unit is milliseconds");
 DEFINE_uint32(get_table_diskused_interval, 600000, "config the interval of get table diskused. unit is milliseconds");
+DEFINE_uint32(get_memory_stat_interval, 10000, "config the interval of get memory stat. unit is milliseconds");
 DEFINE_int32(name_server_task_pool_size, 8, "config the size of name server task pool");
 DEFINE_uint32(name_server_task_concurrency, 2, "config the concurrency of name_server_task");
 DEFINE_uint32(name_server_task_concurrency_for_replica_cluster, 2,
@@ -65,7 +80,8 @@ DEFINE_bool(enable_localtablet, true, "enable or disable local tablet opt when d
 DEFINE_string(bucket_size, "1d", "the default bucket size in pre-aggr table");
 
 // scan configuration
-DEFINE_uint32(scan_max_bytes_size, 2 * 1024 * 1024, "config the max size of scan bytes size");
+// max bytes size: write all even if scan result is too large, let it fail in client(receiver)
+DEFINE_uint32(scan_max_bytes_size, 0, "config the max size of scan bytes size, 0 means unlimit");
 DEFINE_uint32(scan_reserve_size, 1024, "config the size of vec reserve");
 DEFINE_uint32(preview_limit_max_num, 1000, "config the max num of preview limit");
 DEFINE_uint32(preview_default_limit, 100, "config the default limit of preview");
@@ -95,11 +111,13 @@ DEFINE_int32(put_concurrency_limit, 0, "the limit of put concurrency");
 DEFINE_int32(thread_pool_size, 16, "the size of thread pool for other api");
 DEFINE_int32(get_concurrency_limit, 0, "the limit of get concurrency");
 DEFINE_int32(request_max_retry, 3, "max retry time when request error");
-DEFINE_int32(request_timeout_ms, 20000,
-             "request timeout(except the requests sent to taskmanager). unit is milliseconds");
+DEFINE_int32(request_timeout_ms, 20000, "rpc request timeout of misc. unit is milliseconds");
 DEFINE_int32(request_sleep_time, 1000, "the sleep time when request error. unit is milliseconds");
 
-DEFINE_uint32(max_traverse_cnt, 50000, "max traverse iter loop cnt");
+DEFINE_uint32(max_memory_mb, 0, "max memory limit");
+
+DEFINE_uint32(max_traverse_key_cnt, 0, "max traverse iter key cnt");
+DEFINE_uint32(max_traverse_cnt, 0, "max traverse iter loop cnt");
 DEFINE_uint32(traverse_cnt_limit, 1000, "limit traverse cnt");
 DEFINE_string(ssd_root_path, "", "the root ssd path of db");
 DEFINE_string(hdd_root_path, "", "the root hdd path of db");
@@ -141,16 +159,6 @@ DEFINE_uint32(latest_default_skiplist_height, 1, "the default height of skiplist
 DEFINE_uint32(absolute_default_skiplist_height, 4, "the default height of skiplist for absolute table");
 DEFINE_uint32(max_col_display_length, 256, "config the max length of column display");
 
-// rocksdb
-DEFINE_bool(disable_wal, true, "If true, do not write WAL for write.");
-DEFINE_string(file_compression, "off", "Type of compression, can be off, pz, lz4, zlib");
-DEFINE_uint32(block_cache_mb, 4096,
-              "Memory allocated for caching uncompressed block (OS page cache "
-              "handles the compressed ones)");
-DEFINE_uint32(write_buffer_mb, 128, "Memtable size");
-DEFINE_uint32(block_cache_shardbits, 8, "Divide block cache into 2^8 shards to avoid cache contention");
-DEFINE_bool(verify_compression, false, "For debug");
-
 // load table resouce control
 DEFINE_uint32(load_table_batch, 30, "set laod table batch size");
 DEFINE_uint32(load_table_thread_num, 3, "set load tabale thread pool size");
@@ -162,3 +170,24 @@ DEFINE_uint32(get_replica_status_interval, 10000,
 
 DEFINE_uint32(sync_deploy_stats_timeout, 10000,
               "time interval in milliseconds to sync deploy response time stats into table");
+
+// config for rocksdb
+DEFINE_bool(disable_wal, true, "If true, do not write WAL for write.");
+DEFINE_string(file_compression, "off", "Type of compression, can be off, pz, lz4, zlib");
+DEFINE_uint32(block_cache_mb, 4096,
+              "Memory allocated for caching uncompressed block (OS page cache "
+              "handles the compressed ones)");
+DEFINE_uint32(write_buffer_mb, 128, "Memtable size");
+DEFINE_uint32(block_cache_shardbits, 8, "Divide block cache into 2^8 shards to avoid cache contention");
+DEFINE_bool(verify_compression, false, "For debug");
+DEFINE_uint32(max_log_file_size, 100 * 1024 * 1024, "Specify the maximal size of the rocksdb info log file");
+DEFINE_uint32(keep_log_file_num, 5, "Maximal info log files to be kept");
+
+DEFINE_int32(sync_job_timeout, 30 * 60 * 1000,
+             "sync job timeout, unit is milliseconds, should <= server.channel_keep_alive_time in TaskManager");
+DEFINE_int32(deploy_job_max_wait_time_ms, 30 * 60 * 1000, "the max wait time of waiting deploy job");
+DEFINE_bool(skip_grant_tables, true, "skip the grant tables");
+
+// iot 
+// not exactly size, may plus some TODO(hw): too small?
+DEFINE_uint32(cidx_gc_max_size, 1000, "config the max size for one cidx segment gc");

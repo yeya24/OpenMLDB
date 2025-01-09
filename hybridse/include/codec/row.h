@@ -18,14 +18,9 @@
 #define HYBRIDSE_INCLUDE_CODEC_ROW_H_
 
 #include <cstdint>
-#include <map>
 #include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 #include "base/fe_slice.h"
-#include "base/raw_buffer.h"
-#include "proto/fe_type.pb.h"
 
 namespace hybridse {
 namespace codec {
@@ -54,7 +49,7 @@ class Row {
 
     inline int32_t size() const { return slice_.size(); }
     inline int32_t size(int32_t pos) const {
-        return 0 == pos ? slice_.size() : slices_[pos - 1].size();
+        return 0 == pos ? slice_.size() : slices_.at(pos - 1).size();
     }
 
     // Return true if the length of the referenced data is zero
@@ -65,6 +60,10 @@ class Row {
     //   == 0 iff "*this" == "b",
     //   >  0 iff "*this" >  "b"
     int compare(const Row &b) const;
+
+    friend bool operator<(const Row &lhs, const Row &rhs) { return lhs.compare(rhs) < 0; }
+    friend bool operator>(const Row &lhs, const Row &rhs) { return lhs.compare(rhs) > 0; }
+    friend bool operator==(const Row &lhs, const Row &rhs) { return lhs.compare(rhs) == 0; }
 
     int8_t **GetRowPtrs() const;
 

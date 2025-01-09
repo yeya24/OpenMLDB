@@ -15,10 +15,44 @@
  */
 #ifndef HYBRIDSE_INCLUDE_CODEC_ROW_LIST_H_
 #define HYBRIDSE_INCLUDE_CODEC_ROW_LIST_H_
+
 #include <memory>
+#include <optional>
+#include <type_traits>
+
 #include "codec/row_iterator.h"
+
 namespace hybridse {
 namespace codec {
+
+template <typename V>
+struct AtOut {
+    using T = std::conditional_t<std::is_same_v<V, codec::Row>, V, std::optional<V>>;
+
+    static T Null() {
+        if constexpr (std::is_same_v<V, codec::Row>) {
+            return codec::Row();
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    static bool IsNull(T data) {
+        if constexpr (std::is_same_v<V, codec::Row>) {
+            return data.empty();
+        } else {
+            return !data.has_value();
+        }
+    }
+
+    static V Value(T data) {
+        if constexpr (std::is_same_v<V, codec::Row>) {
+            return data;
+        } else {
+            return data.value_or(V{});
+        }
+    }
+};
 /// \brief Basic key-value list of HybridSe.
 /// \tparam V the type of elements in this list
 ///
@@ -31,7 +65,13 @@ class ListV {
     ListV() {}
     virtual ~ListV() {}
     /// \brief Return the const iterator
-    virtual std::unique_ptr<ConstIterator<uint64_t, V>> GetIterator() = 0;
+    virtual std::unique_ptr<ConstIterator<uint64_t, V>> GetIterator() {
+        auto raw = GetRawIterator();
+        if (raw == nullptr) {
+            return {};
+        }
+        return std::unique_ptr<ConstIterator<uint64_t, V>>(raw);
+    }
 
     /// \brief Return the const iterator raw pointer
     virtual ConstIterator<uint64_t, V> *GetRawIterator() = 0;
@@ -42,7 +82,7 @@ class ListV {
     virtual const uint64_t GetCount() {
         auto iter = GetIterator();
         uint64_t cnt = 0;
-        while (iter->Valid()) {
+        while (iter && iter->Valid()) {
             iter->Next();
             cnt++;
         }
@@ -51,15 +91,19 @@ class ListV {
 
     /// \brief Return a the value of element by its position in the list
     /// \param pos is element position in the list
-    virtual V At(uint64_t pos) {
+    virtual typename AtOut<V>::T At(uint64_t pos) {
         auto iter = GetIterator();
         if (!iter) {
-            return V();
+            return AtOut<V>::Null();
         }
         while (pos-- > 0 && iter->Valid()) {
             iter->Next();
         }
-        return iter->Valid() ? iter->GetValue() : V();
+
+        if (iter->Valid() && !iter->IsValueNull()) {
+            return iter->GetValue();
+        }
+        return AtOut<V>::Null();
     }
 };
 }  // namespace codec

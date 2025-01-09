@@ -19,6 +19,7 @@
 #include <vector>
 #include "codegen/arithmetic_expr_ir_builder.h"
 #include "codegen/ir_base_builder.h"
+#include "codegen/null_ir_builder.h"
 
 namespace hybridse {
 namespace codegen {
@@ -43,6 +44,7 @@ void DateIRBuilder::InitStructType() {
     struct_type_ = stype;
     return;
 }
+
 bool DateIRBuilder::CreateDefault(::llvm::BasicBlock* block,
                                   ::llvm::Value** output) {
     return NewDate(block, output);
@@ -53,7 +55,7 @@ bool DateIRBuilder::NewDate(::llvm::BasicBlock* block, ::llvm::Value** output) {
         return false;
     }
     ::llvm::Value* date;
-    if (!Create(block, &date)) {
+    if (!Allocate(block, &date)) {
         return false;
     }
     if (!SetDate(block, date,
@@ -71,7 +73,7 @@ bool DateIRBuilder::NewDate(::llvm::BasicBlock* block, ::llvm::Value* days,
         return false;
     }
     ::llvm::Value* date;
-    if (!Create(block, &date)) {
+    if (!Allocate(block, &date)) {
         return false;
     }
     if (!SetDate(block, date, days)) {
@@ -123,11 +125,10 @@ base::Status DateIRBuilder::CastFrom(::llvm::BasicBlock* block,
         auto cast_func = m_->getOrInsertFunction(
             fn_name,
             ::llvm::FunctionType::get(builder.getVoidTy(),
-                                      {src.GetType(), dist->getType(),
-                                       builder.getInt1Ty()->getPointerTo()},
-                                      false));
-        builder.CreateCall(cast_func,
-                           {src.GetValue(&builder), dist, is_null_ptr});
+                                      {src.GetType(), dist->getType(), builder.getInt1Ty()->getPointerTo()}, false));
+
+        builder.CreateCall(cast_func, {src.GetValue(&builder), dist, is_null_ptr});
+
         ::llvm::Value* should_return_null = builder.CreateLoad(is_null_ptr);
         null_ir_builder.CheckAnyNull(block, src, &should_return_null);
         *output = NativeValue::CreateWithFlag(dist, should_return_null);
@@ -140,7 +141,7 @@ base::Status DateIRBuilder::CastFrom(::llvm::BasicBlock* block,
 }
 bool DateIRBuilder::GetDate(::llvm::BasicBlock* block, ::llvm::Value* date,
                             ::llvm::Value** output) {
-    return Get(block, date, 0, output);
+    return Load(block, date, 0, output);
 }
 bool DateIRBuilder::SetDate(::llvm::BasicBlock* block, ::llvm::Value* date,
                             ::llvm::Value* code) {

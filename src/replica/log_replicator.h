@@ -64,7 +64,7 @@ class LogReplicator {
     bool ApplyEntry(const ::openmldb::api::LogEntry& entry);
 
     // the master node append entry
-    bool AppendEntry(::openmldb::api::LogEntry& entry);  // NOLINT
+    bool AppendEntry(::openmldb::api::LogEntry& entry, ::google::protobuf::Closure* done = nullptr);  // NOLINT
 
     //  data to slave nodes
     void Notify();
@@ -109,6 +109,8 @@ class LogReplicator {
     bool DelAllReplicateNode();
 
     const std::string& GetLogPath() {return log_path_;}
+
+    uint64_t GetSnapshotLastOffset() { return snapshot_last_offset_.load(std::memory_order_relaxed); }
 
  private:
     bool OpenSeqFile(const std::string& path, SequentialFile** sf);

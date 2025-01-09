@@ -26,9 +26,10 @@
 #include <iostream>
 
 #include "base/file_util.h"
-#include "base/glog_wapper.h"
+#include "base/glog_wrapper.h"
 #include "base/strings.h"
 #include "codec/schema_codec.h"
+#include "codec/sdk_codec.h"
 #include "common/timer.h"
 #include "gtest/gtest.h"
 #include "log/log_writer.h"
@@ -107,7 +108,7 @@ TEST_F(SnapshotTest, Recover_binlog_and_snapshot) {
     LogParts* log_part = new LogParts(12, 4, scmp);
     uint64_t offset = 0;
     uint32_t binlog_index = 0;
-    WriteHandle* wh = NULL;
+    WriteHandle* wh = nullptr;
     RollWLogFile(&wh, log_part, binlog_dir, binlog_index, offset);
     int count = 0;
     for (; count < 10; count++) {
@@ -170,7 +171,7 @@ TEST_F(SnapshotTest, Recover_binlog_and_snapshot) {
     binlog.RecoverFromBinlog(table, snapshot_offset, latest_offset);
     // ASSERT_EQ(31u, latest_offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator("key", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("key", ticket));
     it->Seek(1);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(1u, it->GetKey());
@@ -183,8 +184,7 @@ TEST_F(SnapshotTest, Recover_binlog_and_snapshot) {
     ASSERT_EQ("value0", ::openmldb::test::DecodeV(value3_str));
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator("key2", ticket);
+    it.reset(table->NewIterator("key2", ticket));
     it->Seek(11);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(11u, it->GetKey());
@@ -197,15 +197,12 @@ TEST_F(SnapshotTest, Recover_binlog_and_snapshot) {
     ASSERT_EQ("value10", ::openmldb::test::DecodeV(value5_str));
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator("key23", ticket);
+    it.reset(table->NewIterator("key23", ticket));
     it->Seek(23);
     ASSERT_TRUE(it->Valid());
-    delete it;
-    it = table->NewIterator("key25", ticket);
+    it.reset(table->NewIterator("key25", ticket));
     it->Seek(25);
     ASSERT_FALSE(it->Valid());
-    delete it;
 }
 
 TEST_F(SnapshotTest, Recover_only_binlog_multi) {
@@ -257,7 +254,7 @@ TEST_F(SnapshotTest, Recover_only_binlog_multi) {
 
     {
         Ticket ticket;
-        TableIterator* it = table->NewIterator(0, "card0", ticket);
+        std::unique_ptr<TableIterator> it(table->NewIterator(0, "card0", ticket));
         it->Seek(2);
         ASSERT_TRUE(it->Valid());
         ASSERT_EQ(2u, it->GetKey());
@@ -278,7 +275,7 @@ TEST_F(SnapshotTest, Recover_only_binlog_multi) {
 
     {
         Ticket ticket;
-        TableIterator* it = table->NewIterator(1, "merchant0", ticket);
+        std::unique_ptr<TableIterator> it(table->NewIterator(1, "merchant0", ticket));
         it->Seek(2);
         ASSERT_TRUE(it->Valid());
         ASSERT_EQ(2u, it->GetKey());
@@ -331,7 +328,7 @@ TEST_F(SnapshotTest, Recover_only_binlog) {
     binlog.RecoverFromBinlog(table, snapshot_offset, latest_offset);
     ASSERT_EQ(10u, latest_offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator("key", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("key", ticket));
     it->Seek(2);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(2u, it->GetKey());
@@ -454,7 +451,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi) {
     ASSERT_EQ(2u, latest_offset);
     {
         Ticket ticket;
-        TableIterator* it = table->NewIterator(0, "card0", ticket);
+        std::unique_ptr<TableIterator> it(table->NewIterator(0, "card0", ticket));
         it->Seek(9528);
         ASSERT_TRUE(it->Valid());
         ASSERT_EQ(9528u, it->GetKey());
@@ -474,7 +471,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi) {
     }
     {
         Ticket ticket;
-        TableIterator* it = table->NewIterator(1, "merchant0", ticket);
+        std::unique_ptr<TableIterator> it(table->NewIterator(1, "merchant0", ticket));
         it->Seek(9528);
         ASSERT_TRUE(it->Valid());
         ASSERT_EQ(9528u, it->GetKey());
@@ -493,7 +490,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi) {
         ASSERT_FALSE(it->Valid());
     }
     ASSERT_EQ(2u, table->GetRecordCnt());
-    ASSERT_EQ(4u, table->GetRecordIdxCnt());
+    ASSERT_EQ(2u, table->GetRecordIdxCnt());
 }
 
 TEST_F(SnapshotTest, Recover_only_snapshot_multi_with_deleted_index) {
@@ -507,7 +504,6 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi_with_deleted_index) {
     table_meta->set_tid(4);
     table_meta->set_pid(2);
     table_meta->set_seg_cnt(8);
-    table_meta->set_format_version(1);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "card", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "merchant", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "value", ::openmldb::type::kString);
@@ -611,7 +607,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi_with_deleted_index) {
     ASSERT_EQ(2u, latest_offset);
     {
         Ticket ticket;
-        TableIterator* it = table->NewIterator(0, "card0", ticket);
+        std::unique_ptr<TableIterator> it(table->NewIterator(0, "card0", ticket));
         it->Seek(9528);
         ASSERT_TRUE(it->Valid());
         ASSERT_EQ(9528u, it->GetKey());
@@ -632,7 +628,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot_multi_with_deleted_index) {
     {
         Ticket ticket;
         TableIterator* it = table->NewIterator(1, "merchant0", ticket);
-        ASSERT_TRUE(it == NULL);
+        ASSERT_TRUE(it == nullptr);
     }
     ASSERT_EQ(2u, table->GetRecordCnt());
     ASSERT_EQ(2u, table->GetRecordIdxCnt());
@@ -707,7 +703,7 @@ TEST_F(SnapshotTest, Recover_only_snapshot) {
     ASSERT_TRUE(snapshot.Recover(table, offset));
     ASSERT_EQ(2u, offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator("test0", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("test0", ticket));
     it->Seek(9528);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(9528u, it->GetKey());
@@ -720,6 +716,79 @@ TEST_F(SnapshotTest, Recover_only_snapshot) {
     ASSERT_EQ("test1", ::openmldb::test::DecodeV(value3_str));
     it->Next();
     ASSERT_FALSE(it->Valid());
+}
+
+TEST_F(SnapshotTest, RecoverWithDeleteIndex) {
+    uint32_t tid = 12;
+    uint32_t pid = 0;
+    ::openmldb::api::TableMeta meta;
+    meta.set_tid(tid);
+    meta.set_pid(pid);
+    SchemaCodec::SetColumnDesc(meta.add_column_desc(), "userid", ::openmldb::type::kString);
+    SchemaCodec::SetColumnDesc(meta.add_column_desc(), "ts1", ::openmldb::type::kBigInt);
+    SchemaCodec::SetColumnDesc(meta.add_column_desc(), "ts2", ::openmldb::type::kBigInt);
+    SchemaCodec::SetColumnDesc(meta.add_column_desc(), "val", ::openmldb::type::kString);
+    SchemaCodec::SetIndex(meta.add_column_key(), "index1", "userid", "ts1", ::openmldb::type::kLatestTime, 0, 1);
+    SchemaCodec::SetIndex(meta.add_column_key(), "index2", "userid", "ts2", ::openmldb::type::kLatestTime, 0, 1);
+
+    std::string snapshot_dir = absl::StrCat(FLAGS_db_root_path, "/", tid, "_", pid, "/snapshot");
+
+    ::openmldb::base::MkdirRecur(snapshot_dir);
+    std::string snapshot1 = "20231018.sdb";
+    uint64_t offset = 0;
+    {
+        if (FLAGS_snapshot_compression != "off") {
+            snapshot1.append(".");
+            snapshot1.append(FLAGS_snapshot_compression);
+        }
+        std::string full_path = snapshot_dir + "/" + snapshot1;
+        FILE* fd_w = fopen(full_path.c_str(), "ab+");
+        ASSERT_TRUE(fd_w != NULL);
+        ::openmldb::log::WritableFile* wf = ::openmldb::log::NewWritableFile(snapshot1, fd_w);
+        ::openmldb::log::Writer writer(FLAGS_snapshot_compression, wf);
+        ::openmldb::codec::SDKCodec sdk_codec(meta);
+        for (int i = 0; i < 5; i++) {
+            uint32_t ts = 100 + i;
+            for (int key_num = 0; key_num < 10; key_num++) {
+                std::string userid = absl::StrCat("userid", key_num);
+                std::string ts_str = std::to_string(ts);
+                std::vector<std::string> row = {userid, ts_str, ts_str, "aa"};
+                std::string result;
+                sdk_codec.EncodeRow(row, &result);
+                ::openmldb::api::LogEntry entry;
+                entry.set_log_index(offset++);
+                entry.set_value(result);
+                for (int k = 0; k < meta.column_key_size(); k++) {
+                    auto dimension = entry.add_dimensions();
+                    dimension->set_key(userid);
+                    dimension->set_idx(k);
+                }
+                entry.set_ts(ts);
+                entry.set_term(1);
+                std::string val;
+                bool ok = entry.SerializeToString(&val);
+                ASSERT_TRUE(ok);
+                Slice sval(val.c_str(), val.size());
+                ::openmldb::log::Status status = writer.AddRecord(sval);
+                ASSERT_TRUE(status.ok());
+            }
+        }
+        writer.EndLog();
+    }
+
+    auto index1 = meta.mutable_column_key(1);
+    index1->set_flag(1);
+    std::shared_ptr<MemTable> table = std::make_shared<MemTable>(meta);
+    table->Init();
+    LogParts* log_part = new LogParts(12, 4, scmp);
+    MemTableSnapshot snapshot(tid, pid, log_part, FLAGS_db_root_path);
+    ASSERT_TRUE(snapshot.Init());
+    int ret = snapshot.GenManifest(snapshot1, 50, offset, 1);
+    ASSERT_EQ(0, ret);
+    uint64_t r_offset = 0;
+    ASSERT_TRUE(snapshot.Recover(table, r_offset));
+    ASSERT_EQ(r_offset, offset);
+    table->SchedGc();
 }
 
 TEST_F(SnapshotTest, MakeSnapshot) {
@@ -751,7 +820,7 @@ TEST_F(SnapshotTest, MakeSnapshot) {
             ::openmldb::api::LogEntry entry1;
             entry1.set_log_index(offset);
             entry1.set_method_type(::openmldb::api::MethodType::kDelete);
-            ::openmldb::api::Dimension* dimension = entry1.add_dimensions();
+            auto dimension = entry1.add_dimensions();
             dimension->set_key(key);
             dimension->set_idx(0);
             entry1.set_term(5);
@@ -863,7 +932,6 @@ TEST_F(SnapshotTest, MakeSnapshot_with_delete_index) {
     table_meta->set_tid(4);
     table_meta->set_pid(2);
     table_meta->set_seg_cnt(8);
-    table_meta->set_format_version(1);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "card", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "merchant", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "value", ::openmldb::type::kString);
@@ -1010,7 +1078,6 @@ TEST_F(SnapshotTest, MakeSnapshotAbsOrLat) {
     table_meta->set_tid(10);
     table_meta->set_pid(0);
     table_meta->set_seg_cnt(8);
-    table_meta->set_format_version(1);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "card", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "merchant", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "ts", ::openmldb::type::kTimestamp);
@@ -1018,7 +1085,7 @@ TEST_F(SnapshotTest, MakeSnapshotAbsOrLat) {
     SchemaCodec::SetColumnDesc(table_meta->add_column_desc(), "value", ::openmldb::type::kString);
     SchemaCodec::SetIndex(table_meta->add_column_key(), "index1", "card|merchant", "", ::openmldb::type::kAbsOrLat, 0,
                           1);
-    std::shared_ptr<MemTable> table = std::make_shared<MemTable>(*table_meta);
+    std::shared_ptr<Table> table = std::make_shared<MemTable>(*table_meta);
     table->Init();
 
     LogParts* log_part = new LogParts(12, 4, scmp);
@@ -1052,7 +1119,7 @@ TEST_F(SnapshotTest, MakeSnapshotAbsOrLat) {
         google::protobuf::RepeatedPtrField<::openmldb::api::Dimension> d_list;
         ::openmldb::api::Dimension* d_ptr2 = d_list.Add();
         d_ptr2->CopyFrom(dimensions);
-        ASSERT_EQ(table->Put(i + 1, *result, d_list), true);
+        ASSERT_EQ(table->Put(i + 1, *result, d_list).ok(), true);
     }
 
     table->SchedGc();
@@ -1265,7 +1332,7 @@ TEST_F(SnapshotTest, Recover_empty_binlog) {
     binlog.RecoverFromBinlog(table, snapshot_offset, latest_offset);
     ASSERT_EQ(30u, latest_offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator("key_new", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("key_new", ticket));
     it->Seek(2);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(2, (int64_t)it->GetKey());
@@ -1278,8 +1345,7 @@ TEST_F(SnapshotTest, Recover_empty_binlog) {
     ASSERT_EQ("value_new0", ::openmldb::test::DecodeV(value3_str));
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator("key_xxx", ticket);
+    it.reset(table->NewIterator("key_xxx", ticket));
     it->Seek(2);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(2, (int64_t)it->GetKey());
@@ -1314,7 +1380,6 @@ TEST_F(SnapshotTest, Recover_snapshot_ts) {
     table_meta.set_tid(2);
     table_meta.set_pid(2);
     table_meta.set_seg_cnt(8);
-    table_meta.set_format_version(1);
     SchemaCodec::SetColumnDesc(table_meta.add_column_desc(), "card", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta.add_column_desc(), "mcc", ::openmldb::type::kString);
     SchemaCodec::SetColumnDesc(table_meta.add_column_desc(), "amt", ::openmldb::type::kDouble);
@@ -1379,7 +1444,7 @@ TEST_F(SnapshotTest, Recover_snapshot_ts) {
     ASSERT_TRUE(snapshot.Recover(table, offset));
     ASSERT_EQ(1u, offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator(0, "card0", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator(0, "card0", ticket));
     it->Seek(1122);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(1122, (int64_t)it->GetKey());
@@ -1389,8 +1454,7 @@ TEST_F(SnapshotTest, Recover_snapshot_ts) {
     ASSERT_EQ("value0", row[5]);
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator(1, "card0", ticket);
+    it.reset(table->NewIterator(1, "card0", ticket));
     it->Seek(2233);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(2233, (int64_t)it->GetKey());
@@ -1400,8 +1464,7 @@ TEST_F(SnapshotTest, Recover_snapshot_ts) {
     ASSERT_EQ("value0", row[5]);
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator(2, "mcc0", ticket);
+    it.reset(table->NewIterator(2, "mcc0", ticket));
     it->Seek(1122);
     ASSERT_TRUE(it->Valid());
     ASSERT_EQ(1122, (int64_t)it->GetKey());
@@ -1411,11 +1474,9 @@ TEST_F(SnapshotTest, Recover_snapshot_ts) {
     ASSERT_EQ("value0", row[5]);
     it->Next();
     ASSERT_FALSE(it->Valid());
-    delete it;
-    it = table->NewIterator(0, "mcc0", ticket);
+    it.reset(table->NewIterator(0, "mcc0", ticket));
     it->Seek(1122);
     ASSERT_FALSE(it->Valid());
-    delete it;
 }
 
 TEST_F(SnapshotTest, MakeSnapshotWithEndOffset) {
@@ -1614,7 +1675,7 @@ TEST_F(SnapshotTest, Recover_large_snapshot) {
 
     ASSERT_EQ(1000000u, snapshot_offset);
     Ticket ticket;
-    TableIterator* it = table->NewIterator("key", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("key", ticket));
     it->SeekToFirst();
     ASSERT_TRUE(it->Valid());
     uint64_t num = 1000000;
@@ -1627,7 +1688,6 @@ TEST_F(SnapshotTest, Recover_large_snapshot) {
     }
     ASSERT_EQ(0u, num);
     RemoveData(FLAGS_db_root_path);
-    delete it;
 }
 
 TEST_F(SnapshotTest, Recover_large_snapshot_and_binlog) {
@@ -1691,7 +1751,7 @@ TEST_F(SnapshotTest, Recover_large_snapshot_and_binlog) {
     std::cout << "use time in us: " << end_time - start_time << std::endl;
 
     Ticket ticket;
-    TableIterator* it = table->NewIterator("key", ticket);
+    std::unique_ptr<TableIterator> it(table->NewIterator("key", ticket));
     it->SeekToFirst();
     ASSERT_TRUE(it->Valid());
     uint64_t num = total_num * 2;
@@ -1704,7 +1764,79 @@ TEST_F(SnapshotTest, Recover_large_snapshot_and_binlog) {
     }
     ASSERT_EQ(0u, num);
     RemoveData(FLAGS_db_root_path);
-    delete it;
+}
+
+TEST_F(SnapshotTest, DeleteRange) {
+    LogParts* log_part = new LogParts(12, 4, scmp);
+    uint32_t tid = GenRand();
+    uint32_t pid = 2;
+    MemTableSnapshot snapshot(tid, pid, log_part, FLAGS_db_root_path);
+    snapshot.Init();
+    std::map<std::string, uint32_t> mapping = { {"idx0", 0} };
+    auto table = std::make_shared<MemTable>("tx_log", tid, pid, 8, mapping, 0, ::openmldb::type::TTLType::kLatestTime);
+    table->Init();
+    uint64_t offset = 0;
+    uint32_t binlog_index = 0;
+    std::string log_path = absl::StrCat(FLAGS_db_root_path, "/", tid, "_", pid, "/binlog/");
+    std::string snapshot_path = absl::StrCat(FLAGS_db_root_path, "/", tid, "_", pid, "/snapshot/");
+    WriteHandle* wh = NULL;
+    RollWLogFile(&wh, log_part, log_path, binlog_index, offset++);
+    uint64_t ts = 1000;
+    std::string buffer;
+    for (int count = 0; count < 10; count++) {
+        std::string key = "key" + std::to_string(count);
+        for (int i = 0; i < 10; i++) {
+            auto entry = ::openmldb::test::PackKVEntry(offset, key, "value", ts + i, 5);
+            entry.SerializeToString(&buffer);
+            ::openmldb::log::Status status = wh->Write(base::Slice(buffer));
+            offset++;
+        }
+        ::openmldb::api::LogEntry entry;
+        entry.set_log_index(offset);
+        entry.set_method_type(::openmldb::api::MethodType::kDelete);
+        auto dimension = entry.add_dimensions();
+        dimension->set_key(key);
+        dimension->set_idx(0);
+        entry.set_term(5);
+        if (count % 2 == 0) {
+            entry.set_ts(1005);
+            entry.set_end_ts(1003);
+        } else {
+            entry.set_ts(1005);
+        }
+        entry.SerializeToString(&buffer);
+        ::openmldb::log::Status status = wh->Write(base::Slice(buffer));
+        offset++;
+    }
+    ::openmldb::api::LogEntry entry;
+    entry.set_log_index(offset);
+    entry.set_method_type(::openmldb::api::MethodType::kDelete);
+    entry.set_ts(1008);
+    entry.set_end_ts(1006);
+    entry.SerializeToString(&buffer);
+    ::openmldb::log::Status status = wh->Write(base::Slice(buffer));
+    uint64_t offset_value;
+    int ret = snapshot.MakeSnapshot(table, offset_value, 0);
+    ASSERT_EQ(0, ret);
+    std::vector<std::string> vec;
+    ret = ::openmldb::base::GetFileName(snapshot_path, vec);
+    ASSERT_EQ(0, ret);
+    ASSERT_EQ(2, (int32_t)vec.size());
+    vec.clear();
+    ret = ::openmldb::base::GetFileName(log_path, vec);
+    ASSERT_EQ(1, (int32_t)vec.size());
+
+    std::string full_path = snapshot_path + "MANIFEST";
+    ::openmldb::api::Manifest manifest;
+    {
+        int fd = open(full_path.c_str(), O_RDONLY);
+        google::protobuf::io::FileInputStream fileInput(fd);
+        fileInput.SetCloseOnDelete(true);
+        google::protobuf::TextFormat::Parse(&fileInput, &manifest);
+    }
+    ASSERT_EQ(111, (int64_t)manifest.offset());
+    ASSERT_EQ(40, (int64_t)manifest.count());
+    ASSERT_EQ(5, (int64_t)manifest.term());
 }
 
 }  // namespace storage
@@ -1715,11 +1847,13 @@ int main(int argc, char** argv) {
     srand(time(NULL));
     ::google::ParseCommandLineFlags(&argc, &argv, true);
     ::openmldb::base::SetLogLevel(DEBUG);
+    ::openmldb::test::InitRandomDiskFlags("snapshot_test");
     int ret = 0;
     std::vector<std::string> vec{"off", "zlib", "snappy"};
+    ::openmldb::test::TempPath tmp_path;
     for (size_t i = 0; i < vec.size(); i++) {
         std::cout << "compress type: " << vec[i] << std::endl;
-        FLAGS_db_root_path = "/tmp/" + std::to_string(::openmldb::storage::GenRand());
+        FLAGS_db_root_path = tmp_path.GetTempPath();
         FLAGS_snapshot_compression = vec[i];
         ret += RUN_ALL_TESTS();
     }

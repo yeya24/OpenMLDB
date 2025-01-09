@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "sdk/base.h"
+#include "sdk/options.h"
 #include "sdk/result_set.h"
 #include "sdk/sql_delete_row.h"
 #include "sdk/sql_insert_row.h"
@@ -37,23 +38,7 @@
 namespace openmldb {
 namespace sdk {
 
-struct BasicRouterOptions {
-    bool enable_debug = false;
-    uint32_t max_sql_cache_size = 10;
-    uint32_t request_timeout = 60000;
-};
-
-struct SQLRouterOptions : BasicRouterOptions {
-    std::string zk_cluster;
-    std::string zk_path;
-    uint32_t zk_session_timeout = 2000;
-    std::string spark_conf_path;
-};
-
-struct StandaloneOptions : BasicRouterOptions {
-    std::string host;
-    uint32_t port;
-};
+typedef char* ByteArrayPtr;
 
 class ExplainInfo {
  public:
@@ -66,6 +51,22 @@ class ExplainInfo {
     virtual const std::string& GetIR() = 0;
     virtual const std::string& GetRequestName() = 0;
     virtual const std::string& GetRequestDbName() = 0;
+};
+
+struct DAGNode {
+    DAGNode(absl::string_view name, absl::string_view sql) : name(name), sql(sql) {}
+    DAGNode(absl::string_view name, absl::string_view sql, const std::vector<std::shared_ptr<DAGNode>>& producers)
+        : name(name), sql(sql), producers(producers) {}
+
+    std::string name;
+    std::string sql;
+    std::vector<std::shared_ptr<DAGNode>> producers;
+
+    bool operator==(const DAGNode& op) const noexcept;
+
+    std::string DebugString() const;
+
+    friend std::ostream& operator<<(std::ostream& os, const DAGNode& obj);
 };
 
 class QueryFuture {
@@ -99,6 +100,10 @@ class SQLRouter {
 
     virtual bool ExecuteInsert(const std::string& db, const std::string& sql,
                                std::shared_ptr<openmldb::sdk::SQLInsertRows> row, hybridse::sdk::Status* status) = 0;
+
+    virtual bool ExecuteInsert(const std::string& db, const std::string& name, int tid, int partition_num,
+                hybridse::sdk::ByteArrayPtr dimension, int dimension_len,
+                hybridse::sdk::ByteArrayPtr value, int len, bool put_if_absent, hybridse::sdk::Status* status) = 0;
 
     virtual bool ExecuteDelete(std::shared_ptr<openmldb::sdk::SQLDeleteRow> row, hybridse::sdk::Status* status) = 0;
 
@@ -137,6 +142,10 @@ class SQLRouter {
                                                                  int offline_job_timeout,
                                                                  hybridse::sdk::Status* status) = 0;
 
+    virtual std::shared_ptr<hybridse::sdk::ResultSet> ExecuteSQL(
+        const std::string& db, const std::string& sql, std::shared_ptr<openmldb::sdk::SQLRequestRow> parameter,
+        bool is_online_mode, bool is_sync_job, int offline_job_timeout, hybridse::sdk::Status* status) = 0;
+
     virtual std::shared_ptr<hybridse::sdk::ResultSet> ExecuteSQLParameterized(
         const std::string& db, const std::string& sql, std::shared_ptr<openmldb::sdk::SQLRequestRow> parameter,
         hybridse::sdk::Status* status) = 0;
@@ -151,8 +160,17 @@ class SQLRouter {
                                                                     std::shared_ptr<openmldb::sdk::SQLRequestRow> row,
                                                                     hybridse::sdk::Status* status) = 0;
 
+    virtual std::shared_ptr<hybridse::sdk::ResultSet> CallProcedure(const std::string& db, const std::string& sp_name,
+            hybridse::sdk::ByteArrayPtr buf, int len, const std::string& router_col,
+            hybridse::sdk::Status* status) = 0;
+
     virtual std::shared_ptr<hybridse::sdk::ResultSet> CallSQLBatchRequestProcedure(
         const std::string& db, const std::string& sp_name, std::shared_ptr<openmldb::sdk::SQLRequestRowBatch> row_batch,
+        hybridse::sdk::Status* status) = 0;
+
+    virtual std::shared_ptr<hybridse::sdk::ResultSet> CallSQLBatchRequestProcedure(
+        const std::string& db, const std::string& sp_name, hybridse::sdk::ByteArrayPtr meta, int meta_len,
+        hybridse::sdk::ByteArrayPtr buf, int len,
         hybridse::sdk::Status* status) = 0;
 
     virtual std::shared_ptr<hybridse::sdk::ProcedureInfo> ShowProcedure(const std::string& db,
@@ -164,9 +182,19 @@ class SQLRouter {
                                                                       std::shared_ptr<openmldb::sdk::SQLRequestRow> row,
                                                                       hybridse::sdk::Status* status) = 0;
 
+    virtual std::shared_ptr<openmldb::sdk::QueryFuture> CallProcedure(const std::string& db, const std::string& sp_name,
+            int64_t timeout_ms, hybridse::sdk::ByteArrayPtr buf, int len,
+            const std::string& router_col, hybridse::sdk::Status* status) = 0;
+
     virtual std::shared_ptr<openmldb::sdk::QueryFuture> CallSQLBatchRequestProcedure(
         const std::string& db, const std::string& sp_name, int64_t timeout_ms,
         std::shared_ptr<openmldb::sdk::SQLRequestRowBatch> row_batch, hybridse::sdk::Status* status) = 0;
+
+    virtual std::shared_ptr<openmldb::sdk::QueryFuture> CallSQLBatchRequestProcedure(
+        const std::string& db, const std::string& sp_name, int64_t timeout_ms,
+        hybridse::sdk::ByteArrayPtr meta, int meta_len,
+        hybridse::sdk::ByteArrayPtr buf, int len,
+        hybridse::sdk::Status* status) = 0;
 
     virtual std::shared_ptr<hybridse::sdk::Schema> GetTableSchema(const std::string& db,
                                                                   const std::string& table_name) = 0;
@@ -180,11 +208,9 @@ class SQLRouter {
     virtual ::openmldb::base::Status ShowJobs(const bool only_unfinished,
                                               std::vector<::openmldb::taskmanager::JobInfo>* job_infos) = 0;
 
-    virtual ::openmldb::base::Status ShowJob(const int id,
-                                             ::openmldb::taskmanager::JobInfo* job_info) = 0;
+    virtual ::openmldb::base::Status ShowJob(const int id, ::openmldb::taskmanager::JobInfo* job_info) = 0;
 
-    virtual ::openmldb::base::Status StopJob(const int id,
-                                             ::openmldb::taskmanager::JobInfo* job_info) = 0;
+    virtual ::openmldb::base::Status StopJob(const int id, ::openmldb::taskmanager::JobInfo* job_info) = 0;
 
     virtual std::shared_ptr<hybridse::sdk::ResultSet> ExecuteOfflineQuery(const std::string& db, const std::string& sql,
                                                                           bool is_sync_job, int job_timeout,
@@ -194,7 +220,14 @@ class SQLRouter {
 
     virtual bool NotifyTableChange() = 0;
 
-    virtual bool IsOnlineMode() = 0;
+    virtual bool IsOnlineMode() const = 0;
+
+    virtual std::string GetDatabase() = 0;
+
+    // parse SQL query into DAG representation
+    //
+    // Optional CONFIG clause from SQL query statement is skipped in output DAG
+    std::shared_ptr<DAGNode> SQLToDAG(const std::string& query, hybridse::sdk::Status* status);
 };
 
 std::shared_ptr<SQLRouter> NewClusterSQLRouter(const SQLRouterOptions& options);
@@ -240,13 +273,41 @@ std::shared_ptr<SQLRouter> NewStandaloneSQLRouter(const StandaloneOptions& optio
  *      ]
  */
 // TODO(hw): support multi db
+// All types should be convertible in swig, so we use vector&pair, not map
 std::vector<std::string> GenDDL(
     const std::string& sql,
     const std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>& schemas);
 
+// support multi db, input schema: vector<db, vector<table, vector<column, type>>>
+// if using db is empty, use the first db in schemas
 std::shared_ptr<hybridse::sdk::Schema> GenOutputSchema(
-    const std::string& sql,
-    const std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>& schemas);
+    const std::string& sql, const std::string& db,
+    const std::vector<
+        std::pair<std::string,
+                  std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>>&
+        schemas);
+
+std::vector<std::string> ValidateSQLInBatch(
+    const std::string& sql, const std::string& db,
+    const std::vector<
+        std::pair<std::string,
+                  std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>>&
+        schemas);
+
+std::vector<std::string> ValidateSQLInRequest(
+    const std::string& sql, const std::string& db,
+    const std::vector<
+        std::pair<std::string,
+                  std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>>&
+        schemas);
+
+// vector[0] is the main db.table
+std::vector<std::pair<std::string, std::string>> GetDependentTables(
+    const std::string& sql, const std::string& db,
+    const std::vector<
+        std::pair<std::string,
+                  std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>>&
+        schemas);
 
 }  // namespace sdk
 }  // namespace openmldb

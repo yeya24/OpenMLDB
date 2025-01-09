@@ -15,15 +15,8 @@
  */
 
 #include "planv2/planner_v2.h"
-#include <algorithm>
-#include <map>
-#include <random>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
+
 #include "planv2/ast_node_converter.h"
-#include "proto/fe_common.pb.h"
 
 namespace hybridse {
 namespace plan {
@@ -40,11 +33,10 @@ base::Status SimplePlannerV2::CreateASTScriptPlan(const zetasql::ASTScript *scri
     CHECK_STATUS(ConvertASTScript(script, node_manager_, &resolved_trees));
     CHECK_TRUE(nullptr != resolved_trees && resolved_trees->GetSize() > 0, common::kPlanError,
                "fail to create plan, sql trees is null or empty");
-    DLOG(INFO) << "parsed SqlNode:\n" << resolved_trees->GetTreeString();
     CHECK_STATUS(CreatePlanTree(resolved_trees->GetList(), plan_trees));
     DLOG(INFO) << "PlanNode:";
     for (decltype(plan_trees.size()) i = 0; i < plan_trees.size(); ++i) {
-        DLOG(INFO) << i << "=>" << plan_trees[i]->GetTreeString();
+        DLOG(INFO) << i << "=>\n" << plan_trees[i]->GetTreeString();
     }
     return base::Status::OK();
 }

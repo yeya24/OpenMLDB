@@ -1,0 +1,1 @@
+For full instructions, please refer to [website page](http://openmldb.ai/docs/zh/main/use_case/JD_recommendation.html) or [github md](https://github.com/4paradigm/OpenMLDB/blob/main/docs/zh/use_case/JD_recommendation.md)

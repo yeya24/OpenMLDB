@@ -15,29 +15,16 @@
  */
 
 #include <memory>
-#include <utility>
-#include "boost/algorithm/string.hpp"
+
+#include "absl/strings/match.h"
 #include "case/sql_case.h"
 #include "gtest/gtest.h"
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/GVN.h"
-#include "plan/plan_api.h"
 #include "testing/test_base.h"
 #include "vm/sql_compiler.h"
 
 using namespace llvm;       // NOLINT
-using namespace llvm::orc;  // NOLINT
 
 ExitOnError ExitOnErr;
 
@@ -53,6 +40,9 @@ class RunnerTest : public ::testing::TestWithParam<SqlCase> {};
 INSTANTIATE_TEST_SUITE_P(
     SqlSimpleQueryParse, RunnerTest,
     testing::ValuesIn(sqlcase::InitCases("cases/plan/simple_query.yaml", FILTERS)));
+INSTANTIATE_TEST_SUITE_P(
+    SqlFeatureSignatureQueryParse, RunnerTest,
+    testing::ValuesIn(sqlcase::InitCases("cases/plan/feature_signature_query.yaml", FILTERS)));
 INSTANTIATE_TEST_SUITE_P(
     SqlWindowQueryParse, RunnerTest,
     testing::ValuesIn(sqlcase::InitCases("cases/plan/window_query.yaml", FILTERS)));
@@ -88,13 +78,13 @@ void RunnerCheck(std::shared_ptr<Catalog> catalog, const std::string sql,
     ASSERT_TRUE(ok) << compile_status;
     ASSERT_TRUE(sql_compiler.BuildClusterJob(sql_context, compile_status));
     ASSERT_TRUE(nullptr != sql_context.physical_plan);
-    ASSERT_TRUE(sql_context.cluster_job.IsValid());
+    ASSERT_TRUE(sql_context.cluster_job->IsValid());
     std::ostringstream oss;
     sql_context.physical_plan->Print(oss, "");
     std::cout << "physical plan:\n" << sql << "\n" << oss.str() << std::endl;
 
     std::ostringstream runner_oss;
-    sql_context.cluster_job.Print(runner_oss, "");
+    sql_context.cluster_job->Print(runner_oss, "");
     std::cout << "runner: \n" << runner_oss.str() << std::endl;
 
     std::ostringstream oss_schema;
@@ -102,8 +92,8 @@ void RunnerCheck(std::shared_ptr<Catalog> catalog, const std::string sql,
     std::cout << "schema:\n" << oss_schema.str();
 }
 
-TEST_P(RunnerTest, request_mode_test) {
-    if (boost::contains(GetParam().mode(), "request-unsupport")) {
+TEST_P(RunnerTest, RequestModeTest) {
+    if (absl::StrContains(GetParam().mode(), "request-unsupport")) {
         LOG(INFO) << "Skip sql case: request unsupport";
         return;
     }
@@ -233,8 +223,8 @@ TEST_P(RunnerTest, request_mode_test) {
     RunnerCheck(catalog, sqlstr, sql_case.ExtractParameterTypes(), kRequestMode);
 }
 
-TEST_P(RunnerTest, batch_mode_test) {
-    if (boost::contains(GetParam().mode(), "batch-unsupport")) {
+TEST_P(RunnerTest, BatchModeTest) {
+    if (absl::StrContains(GetParam().mode(), "batch-unsupport")) {
         LOG(INFO) << "Skip sql case: batch unsupport";
         return;
     }
@@ -357,12 +347,12 @@ TEST_F(RunnerTest, KeyGeneratorTest) {
     sql_context.engine_mode = kBatchMode;
     base::Status compile_status;
     bool ok = sql_compiler.Compile(sql_context, compile_status);
-    ASSERT_TRUE(ok);
+    ASSERT_TRUE(ok && compile_status.isOK()) << compile_status;
     ASSERT_TRUE(sql_compiler.BuildClusterJob(sql_context, compile_status));
     ASSERT_TRUE(sql_context.physical_plan != nullptr);
 
     auto root = GetFirstRunnerOfType(
-        sql_context.cluster_job.GetTask(0).GetRoot(), kRunnerGroup);
+        sql_context.cluster_job->GetTask(0).GetRoot(), kRunnerGroup);
     auto group_runner = dynamic_cast<GroupRunner*>(root);
     std::vector<Row> rows;
     hybridse::type::TableDef temp_table;

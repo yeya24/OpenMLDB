@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "udf/containers.h"
+#include "udf/default_defs/containers.h"
 #include "udf/default_udf_library.h"
 #include "udf/udf_registry.h"
 
@@ -42,7 +43,7 @@ struct MinCateDef {
 
     template <typename V>
     struct Impl {
-        using ContainerT = udf::container::BoundedGroupByDict<K, V, V>;
+        using ContainerT = udf::container::BoundedGroupByDict<K, V>;
         using InputK = typename ContainerT::InputK;
         using InputV = typename ContainerT::InputV;
 
@@ -56,6 +57,11 @@ struct MinCateDef {
                 .init("min_cate_init" + suffix, ContainerT::Init)
                 .update("min_cate_update" + suffix, Update)
                 .output("min_cate_output" + suffix, Output);
+        }
+
+        // FormatValueF
+        static uint32_t FormatValueFn(const typename ContainerT::StorageValue& val, char* buf, size_t size) {
+            return v1::format_string(val, buf, size);
         }
 
         static ContainerT* Update(ContainerT* ptr, InputV value,
@@ -100,7 +106,7 @@ struct MinCateWhereDef {
 
     template <typename V>
     struct Impl {
-        using ContainerT = udf::container::BoundedGroupByDict<K, V, V>;
+        using ContainerT = udf::container::BoundedGroupByDict<K, V>;
         using InputK = typename ContainerT::InputK;
         using InputV = typename ContainerT::InputV;
 
@@ -143,7 +149,7 @@ struct TopKMinCateWhereDef {
 
     template <typename V>
     struct Impl {
-        using ContainerT = udf::container::BoundedGroupByDict<K, V, V>;
+        using ContainerT = udf::container::BoundedGroupByDict<K, V>;
         using InputK = typename ContainerT::InputK;
         using InputV = typename ContainerT::InputV;
 
@@ -207,6 +213,17 @@ struct TopKMinCateWhereDef {
     };
 };
 
+template <typename K>
+struct TopNValueMinCateWhereDef {
+    void operator()(UdafRegistryHelper& helper) {  // NOLINT
+        helper.library()
+            ->RegisterUdafTemplate<container::TopNCateWhereImpl<MinCateDef<K>::template Impl>::template Impl>(
+                helper.name())
+            .doc(helper.GetDoc())
+            .template args_in<int16_t, int32_t, int64_t, float, double>();
+    }
+};
+
 void DefaultUdfLibrary::InitMinByCateUdafs() {
     RegisterUdafTemplate<MinCateDef>("min_cate")
         .doc(R"(
@@ -239,9 +256,9 @@ void DefaultUdfLibrary::InitMinByCateUdafs() {
     category key and output string. Each group is represented as 'K:V' and
     separated by comma in outputs and are sorted by key in ascend order.
 
-            @param catagory  Specify catagory column to group by.
             @param value  Specify value column to aggregate on.
             @param condition  Specify condition column.
+            @param catagory  Specify catagory column to group by.
 
             Example:
 
@@ -255,7 +272,7 @@ void DefaultUdfLibrary::InitMinByCateUdafs() {
             3|true|y
 
             @code{.sql}
-                SELECT min_cate_where(catagory, value, condition) OVER w;
+                SELECT min_cate_where(value, condition, category) OVER w;
                 -- output "x:0,y:1"
             @endcode
             )")
@@ -264,12 +281,12 @@ void DefaultUdfLibrary::InitMinByCateUdafs() {
     RegisterUdafTemplate<TopKMinCateWhereDef>("top_n_key_min_cate_where")
         .doc(R"(
             @brief Compute minimum of values matching specified condition grouped by
-    category key. Output string for top N keys in descend order. Each group is
-    represented as 'K:V' and separated by comma.
+    category key. Output string for top N category keys in descend order. Each group is
+    represented as 'K:V' and separated by comma(,). Empty string returned if no rows selected.
 
-            @param catagory  Specify catagory column to group by.
             @param value  Specify value column to aggregate on.
             @param condition  Specify condition column.
+            @param catagory  Specify catagory column to group by.
             @param n  Fetch top n keys.
 
             Example:
@@ -283,11 +300,47 @@ void DefaultUdfLibrary::InitMinByCateUdafs() {
             4|false|x
             5|true|z
             6|true|z
+
             @code{.sql}
                 SELECT top_n_key_min_cate_where(value, condition, catagory, 2)
     OVER w;
                 -- output "z:5,y:1"
             @endcode
+
+            @since 0.1.0
+            )")
+        .args_in<int16_t, int32_t, int64_t, Date, Timestamp, StringRef>();
+
+    RegisterUdafTemplate<TopNValueMinCateWhereDef>("top_n_value_min_cate_where")
+        .doc(R"(
+            @brief Compute minimum of values matching specified condition grouped by
+    category key. Output string for top N aggregate values in descend order. Each group is
+    represented as 'K:V' and separated by comma(,). Empty string returned if no rows selected.
+
+            @param value  Specify value column to aggregate on.
+            @param condition  Specify condition column.
+            @param catagory  Specify catagory column to group by.
+            @param n  Fetch top n keys.
+
+            Example:
+
+            value|condition|catagory
+            --|--|--
+            0|true|x
+            1|true|y
+            2|true|x
+            3|true|y
+            4|false|x
+            5|true|z
+            6|true|z
+
+            @code{.sql}
+                SELECT top_n_value_min_cate_where(value, condition, catagory, 2)
+    OVER w;
+                -- output "z:5,x:2"
+            @endcode
+
+            @since 0.6.4
             )")
         .args_in<int16_t, int32_t, int64_t, Date, Timestamp, StringRef>();
 }

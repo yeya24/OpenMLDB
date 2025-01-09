@@ -63,20 +63,10 @@ bool StringIRBuilder::CreateDefault(::llvm::BasicBlock* block,
                                     ::llvm::Value** output) {
     return NewString(block, output);
 }
-/// Create Const String Null
-/// \param block
-/// \param output
-/// \return
-base::Status StringIRBuilder::CreateNull(::llvm::BasicBlock* block, NativeValue* output) {
-    ::llvm::Value* value = nullptr;
-    CHECK_TRUE(NewString(block, &value), kCodegenError, "Fail to construct string")
-    ::llvm::IRBuilder<> builder(block);
-    *output = NativeValue::CreateWithFlag(value, builder.getInt1(true));
-    return base::Status::OK();
-}
+
 bool StringIRBuilder::NewString(::llvm::BasicBlock* block,
                                 ::llvm::Value** output) {
-    if (!Create(block, output)) {
+    if (!Allocate(block, output)) {
         LOG(WARNING) << "Fail to Create Default String";
         return false;
     }
@@ -96,7 +86,7 @@ bool StringIRBuilder::NewString(::llvm::BasicBlock* block,
 }
 bool StringIRBuilder::NewString(::llvm::BasicBlock* block, ::llvm::Value* size,
                                 ::llvm::Value* data, ::llvm::Value** output) {
-    if (!Create(block, output)) {
+    if (!Allocate(block, output)) {
         LOG(WARNING) << "Fail to Create Default String";
         return false;
     }
@@ -112,7 +102,7 @@ bool StringIRBuilder::NewString(::llvm::BasicBlock* block, ::llvm::Value* size,
 }
 bool StringIRBuilder::GetSize(::llvm::BasicBlock* block, ::llvm::Value* str,
                               ::llvm::Value** output) {
-    return Get(block, str, 0, output);
+    return Load(block, str, 0, output);
 }
 
 // 浅拷贝
@@ -152,7 +142,7 @@ bool StringIRBuilder::SetSize(::llvm::BasicBlock* block, ::llvm::Value* str,
 }
 bool StringIRBuilder::GetData(::llvm::BasicBlock* block, ::llvm::Value* str,
                               ::llvm::Value** output) {
-    return Get(block, str, 1, output);
+    return Load(block, str, 1, output);
 }
 bool StringIRBuilder::SetData(::llvm::BasicBlock* block, ::llvm::Value* str,
                               ::llvm::Value* data) {
@@ -412,6 +402,18 @@ base::Status StringIRBuilder::ConcatWS(::llvm::BasicBlock* block,
                "fail to concat string: create concat string fail");
     *output = NativeValue::CreateWithFlag(concat_str, ret_null);
     return base::Status();
+}
+absl::Status StringIRBuilder::CastFrom(llvm::BasicBlock* block, llvm::Value* src, llvm::Value* alloca) {
+    if (IsStringPtr(src->getType())) {
+        return absl::UnimplementedError("not necessary to cast string to string");
+    }
+    ::llvm::IRBuilder<> builder(block);
+    ::std::string fn_name = "string." + TypeName(src->getType());
+
+    auto cast_func = m_->getOrInsertFunction(
+        fn_name, ::llvm::FunctionType::get(builder.getVoidTy(), {src->getType(), alloca->getType()}, false));
+    builder.CreateCall(cast_func, {src, alloca});
+    return absl::OkStatus();
 }
 }  // namespace codegen
 }  // namespace hybridse

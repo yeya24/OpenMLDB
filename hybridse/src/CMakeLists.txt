@@ -48,6 +48,7 @@ hybridse_add_src_and_tests(vm)
 hybridse_add_src_and_tests(codec)
 hybridse_add_src_and_tests(case)
 hybridse_add_src_and_tests(passes)
+hybridse_add_src_and_tests(rewriter)
 
 get_property(SRC_FILE_LIST_STR GLOBAL PROPERTY PROP_SRC_FILE_LIST)
 string(REPLACE " " ";" SRC_FILE_LIST ${SRC_FILE_LIST_STR})
@@ -58,16 +59,20 @@ if (LLVM_EXT_ENABLE)
     add_definitions(-DLLVM_EXT_ENABLE)
 endif ()
 
-add_library(hybridse_flags STATIC ${CMAKE_CURRENT_SOURCE_DIR}/flags.cc)
+add_library(hybridse_flags ${CMAKE_CURRENT_SOURCE_DIR}/flags.cc)
 target_link_libraries(hybridse_flags ${GFLAGS_LIBRARY})
 
 # hybridse core library, enable BUILD_SHARED_LIBS to build shared lib
 add_library(hybridse_core ${SRC_FILE_LIST} $<TARGET_OBJECTS:hybridse_proto> case/case_data_mock.cc)
 target_link_libraries(hybridse_core
-    ${yaml_libs} ${LLVM_LIBS} ${ZETASQL_LIBS} ${OS_LIB} ${COMMON_LIBS} ${g_libs} ${LLVM_EXT_LIB} hybridse_flags)
+    ${yaml_libs} ${LLVM_LIBS} ${ZETASQL_LIBS} ${OS_LIB} ${COMMON_LIBS} ${g_libs}
+    ${LLVM_EXT_LIB} op_contrib::simdjson farmhash hybridse_flags)
 set(HYBRIDSE_CORE_LIBS hybridse_core)
 
 add_subdirectory(testing)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
 # hybridse core unittests
 if (TESTING_ENABLE AND HYBRIDSE_TESTING_ENABLE)
     get_property(TEST_FILE_LIST_STR GLOBAL PROPERTY PROP_TEST_SRC_FILE_LIST)
@@ -77,11 +82,12 @@ if (TESTING_ENABLE AND HYBRIDSE_TESTING_ENABLE)
         file(RELATIVE_PATH RELATIVE_TEST_PATH ${TEST_CPP_SOURCE_DIR} ${TEST_SCRIPT})
         get_filename_component(TEST_TARGET_DIR ${RELATIVE_TEST_PATH} DIRECTORY)
         get_filename_component(TEST_TARGET_NAME ${RELATIVE_TEST_PATH} NAME_WE)
-        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${TEST_TARGET_DIR})
 
         add_executable(${TEST_TARGET_NAME} ${TEST_SCRIPT} testing/engine_test_base.cc testing/test_base.cc)
         target_link_libraries(${TEST_TARGET_NAME} ${GTEST_LIBRARIES} ${HYBRIDSE_CORE_LIBS} hybridse_flags
-                ${yaml_libs} ${ZETASQL_LIBS} ${BRPC_LIBS})
+                              ${yaml_libs} ${ZETASQL_LIBS} ${COMMON_LIBS})
+        set_target_properties(${TEST_TARGET_NAME} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${TEST_TARGET_DIR})
         add_test(${TEST_TARGET_NAME}
                 ${CMAKE_CURRENT_BINARY_DIR}/${TEST_TARGET_DIR}/${TEST_TARGET_NAME}
                 --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/${TEST_TARGET_DIR}/${TEST_TARGET_NAME}.xml)
@@ -94,7 +100,6 @@ if (TESTING_ENABLE AND HYBRIDSE_TESTING_ENABLE)
 
         list(APPEND test_list ${TEST_TARGET_NAME})
     endforeach ()
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif ()
 
 # hybridse sdk

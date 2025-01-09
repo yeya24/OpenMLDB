@@ -18,7 +18,8 @@ include_directories(${INCLUDE_DIRECTORIES}
 
 
 set(SDK_DEPS_LIBS hybridse_core hybridse_flags
-		${yaml_libs} ${Boost_filesystem_LIBRARY} ${LLVM_LIBS} ${ZETASQL_LIBS} ${BRPC_LIBS} ${OS_LIB} )
+    ${yaml_libs} ${Boost_filesystem_LIBRARY} ${LLVM_LIBS} ${ZETASQL_LIBS}
+    ${BRPC_LIBRARY} ${COMMON_LIBS} ${OS_LIB} )
 
 # split sdk test and bm
 set(SDK_SRC_FILE_LIST)
@@ -71,5 +72,5 @@ if(SQL_JAVASDK_ENABLE)
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/java/hybridse-native/src/main/resources/
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:hybridse_jsdk_core> ${CMAKE_SOURCE_DIR}/java/hybridse-native/src/main/resources/
     COMMENT "copy hybridse native so")
-  add_dependencies(cp_hybridse_native_so hybridse_proto_java)
+  add_dependencies(cp_hybridse_native_so hybridse_proto)
 endif()

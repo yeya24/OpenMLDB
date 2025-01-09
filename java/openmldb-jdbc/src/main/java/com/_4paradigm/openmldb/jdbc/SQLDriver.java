@@ -42,14 +42,17 @@ public class SQLDriver implements Driver {
      * @throws SQLException if it is not possible to connect
      */
     @Override
-    public Connection connect(String url, Properties info) throws SQLException {
+    public Connection connect(String url, Properties info) throws SQLException { 
+        // Merge connectProperties (from URL) and supplied properties from user.
+        // TODO(hw): only cluster mode now, support StandaloneOptions later
+        if (info == null) {
+            info = new Properties();
+        }
+        // just url missmatch, don't throw exception
+        if (!parseAndMergeClusterProps(url, info)) {
+            return null;
+        }
         try {
-            // Merge connectProperties (from URL) and supplied properties from user.
-            // TODO(hw): only cluster mode now, support StandaloneOptions later
-            if (info == null) {
-                info = new Properties();
-            }
-            parseAndMergeClusterProps(url, info);
             SdkOption option = createOptionByProps(info);
             SqlExecutor client = new SqlClusterExecutor(option);
             return new SQLConnection(client, info);
@@ -59,7 +62,7 @@ public class SQLDriver implements Driver {
     }
 
     /**
-     * parse and verification of URL.
+     * parse and verification of URL. If url is just not acceptted, return false.
      *
      * <p>basic syntax :<br>
      * {@code
@@ -79,11 +82,12 @@ public class SQLDriver implements Driver {
      * jdbc:openmldb:///db_test?zk=localhost:6181&zkPath=/onebox&sessionTimeout=1000&enableDebug=true}
      * <br>
      */
-    private void parseAndMergeClusterProps(String url, Properties info) throws SQLException {
+    private boolean parseAndMergeClusterProps(String url, Properties info) throws SQLException {
         if (!acceptsURL(url)) {
-            throw new SQLException("not a valid url");
+            return false;
         }
         parseInternal(url, info);
+        return true;
     }
 
     /**
@@ -120,9 +124,10 @@ public class SQLDriver implements Driver {
         }
     }
 
-    // only five options. If more, we should use alias map.
+    // If more, we should use option map <prop name, option name-type>.
     private SdkOption createOptionByProps(Properties properties) {
         SdkOption option = new SdkOption();
+        // requires
         String prop = properties.getProperty("zk");
         if (prop != null) {
             option.setZkCluster(prop);
@@ -135,6 +140,8 @@ public class SQLDriver implements Driver {
         } else {
             throw new IllegalArgumentException("must set param 'zkPath'");
         }
+
+        // optionals
         prop = properties.getProperty("sessionTimeout");
         if (prop != null) {
             option.setSessionTimeout(Long.parseLong(prop));
@@ -146,6 +153,38 @@ public class SQLDriver implements Driver {
         prop = properties.getProperty("requestTimeout");
         if (prop != null) {
             option.setRequestTimeout(Long.parseLong(prop));
+        }
+        prop = properties.getProperty("zkLogLevel");
+        if (prop != null) {
+            option.setZkLogLevel(Integer.parseInt(prop));
+        }
+        prop = properties.getProperty("zkLogFile");
+        if (prop != null) {
+            option.setZkLogFile(prop);
+        }
+        prop = properties.getProperty("zkCert");
+        if (prop != null) {
+            option.setZkCert(prop);
+        }
+        prop = properties.getProperty("glogLevel");
+        if (prop != null) {
+            option.setGlogLevel(Integer.parseInt(prop));
+        }
+        prop = properties.getProperty("glogDir");
+        if (prop != null) {
+            option.setGlogDir(prop);
+        }
+        prop = properties.getProperty("maxSqlCacheSize");
+        if (prop != null) {
+            option.setMaxSqlCacheSize(Integer.parseInt(prop));
+        }
+        prop = properties.getProperty("user");
+        if (prop != null) {
+            option.setUser(prop);
+        }
+        prop = properties.getProperty("password");
+        if (prop != null) {
+            option.setPassword(prop);
         }
         return option;
     }

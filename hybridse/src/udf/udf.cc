@@ -15,29 +15,31 @@
  */
 
 #include "udf/udf.h"
-#include <absl/time/time.h>
+
 #include <stdint.h>
 #include <time.h>
-#include <map>
-#include <set>
+
+#include <ctime>
 #include <utility>
+#include <vector>
+
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_replace.h"
 #include "absl/time/civil_time.h"
+#include "absl/time/time.h"
+#include "base/cartesian_product.h"
 #include "base/iterator.h"
-#include "boost/date_time.hpp"
+#include "boost/date_time/gregorian/conversion.hpp"
 #include "boost/date_time/gregorian/parsers.hpp"
-#include "boost/date_time/posix_time/posix_time.hpp"
-
 #include "bthread/types.h"
-#include "codec/list_iterator_codec.h"
 #include "codec/row.h"
 #include "codec/type_codec.h"
-#include "codegen/fn_ir_builder.h"
+#include "farmhash.h"
 #include "node/node_manager.h"
 #include "node/sql_node.h"
-#include "udf/default_udf_library.h"
+#include "re2/re2.h"
 #include "udf/literal_traits.h"
+#include "udf/udf_library.h"
 #include "vm/jit_runtime.h"
 
 namespace hybridse {
@@ -52,6 +54,20 @@ using openmldb::base::StringRef;
 using openmldb::base::Timestamp;
 using openmldb::base::Date;
 
+// strftime()-like formatting options with extensions
+// ref absl::FormatTime
+static constexpr char DATE_FMT_YMD_1[] = "%E4Y-%m-%d";
+static constexpr char DATE_FMT_YMD_2[] = "%E4Y%m%d";
+static constexpr char DATE_FMT_YMDHMS[] = "%E4Y-%m-%d %H:%M:%S";
+static constexpr char DATE_FMT_RF3399_FULL[] = "%Y-%m-%d%ET%H:%M:%E*S%Ez";
+
+// TODO(chenjing): 时区统一配置
+static constexpr int32_t TZ = 8;
+static const absl::TimeZone DEFAULT_TZ = absl::FixedTimeZone(TZ * 60 * 60);
+static constexpr time_t TZ_OFFSET = TZ * 3600000;
+static constexpr int MAX_ALLOC_SIZE = 2 * 1024 * 1024;  // 2M
+bthread_key_t B_THREAD_LOCAL_MEM_POOL_KEY;
+
 void hex(StringRef *str, StringRef *output) {
     std::ostringstream ss;
     for (uint32_t i=0; i < str->size_; i++) {
@@ -63,12 +79,41 @@ void hex(StringRef *str, StringRef *output) {
     output->data_ = buffer;
 }
 
+void unhex(StringRef *str, StringRef *output, bool* is_null) {
+    char *buffer = AllocManagedStringBuf(str->size_ / 2 + str->size_ % 2);
+    for (uint32_t i = 0; i < str->size_; ++i) {
+        if ((str->data_[i] >= 'A' && str->data_[i] <= 'F') ||
+            (str->data_[i] >= 'a' && str->data_[i] <= 'f') ||
+            (str->data_[i] >= '0' && str->data_[i] <= '9')) {
+            continue;
+        } else {
+            *is_null = true;
+            break;
+        }
+    }
+    // use lambda function to convert the char to uint8
+    auto convert = [](char a) -> int {
+        if (a <= 'F' && a >= 'A') { return a - 'A' + 10; }
+        if (a <= 'f' && a >= 'a') { return a - 'a' + 10; }
+        if (a <= '9' && a >= '0') { return a - '0'; }
+        return 0;
+    };
 
-// TODO(chenjing): 时区统一配置
-constexpr int32_t TZ = 8;
-constexpr time_t TZ_OFFSET = TZ * 3600000;
-constexpr int MAX_ALLOC_SIZE = 2 * 1024 * 1024;  // 2M
-bthread_key_t B_THREAD_LOCAL_MEM_POOL_KEY;
+    if (!*is_null) {    // every character is valid hex character
+        if (str->size_ % 2 == 0) {
+            for (uint32_t i = 0; i < str->size_; i += 2) {
+                buffer[i / 2] = static_cast<char>(convert(str->data_[i]) << 4 | convert(str->data_[i + 1]));
+            }
+        } else {
+            buffer[0] = static_cast<char>(convert(str->data_[0]));
+            for (uint32_t i = 1; i < str->size_; i += 2) {
+                buffer[i / 2 + 1] = static_cast<char>(convert(str->data_[i]) << 4 | convert(str->data_[i + 1]));
+            }
+        }
+        output->size_ = str->size_ / 2 + str->size_ % 2;
+        output->data_ = buffer;
+    }
+}
 
 void trivial_fun() {}
 
@@ -90,18 +135,21 @@ void dayofyear(int64_t ts, int32_t* out, bool* is_null) {
 int32_t dayofmonth(int64_t ts) {
     time_t time = (ts + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     return t.tm_mday;
 }
 int32_t dayofweek(int64_t ts) {
     time_t time = (ts + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     return t.tm_wday + 1;
 }
 int32_t weekofyear(int64_t ts) {
     time_t time = (ts + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     try {
         boost::gregorian::date d = boost::gregorian::date_from_tm(t);
@@ -113,12 +161,14 @@ int32_t weekofyear(int64_t ts) {
 int32_t month(int64_t ts) {
     time_t time = (ts + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     return t.tm_mon + 1;
 }
 int32_t year(int64_t ts) {
     time_t time = (ts + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     return t.tm_year + 1900;
 }
@@ -233,10 +283,6 @@ int32_t char_length(StringRef *str) {
 
 float Cotf(float x) { return cosf(x) / sinf(x); }
 
-double degree_to_radius(double degree) {
-    return degree/180.0L*M_PI;
-}
-
 double Degrees(double x) { return x * (180 / M_PI); }
 
 void date_format(Timestamp *timestamp,
@@ -251,6 +297,7 @@ void date_format(const Timestamp *timestamp, const char *format,
                  char *buffer, size_t size) {
     time_t time = (timestamp->ts_ + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     gmtime_r(&time, &t);
     strftime(buffer, size, format, &t);
 }
@@ -344,10 +391,10 @@ void bool_to_string(bool v, StringRef *output) {
     }
 }
 
-void timestamp_to_date(Timestamp *timestamp,
-                       Date *output, bool *is_null) {
+void timestamp_to_date(Timestamp *timestamp, Date *output, bool *is_null) {
     time_t time = (timestamp->ts_ + TZ_OFFSET) / 1000;
     struct tm t;
+    memset(&t, 0, sizeof(struct tm));
     if (nullptr == gmtime_r(&time, &t)) {
         *is_null = true;
         return;
@@ -505,6 +552,80 @@ void ilike(StringRef* name, StringRef* pattern, bool* out, bool* is_null) {
     ilike(name, pattern, &default_esc,  out, is_null);
 }
 
+
+// The options are (defaults in parentheses):
+//
+//   utf8             (true)  text and pattern are UTF-8; otherwise Latin-1
+//   posix_syntax     (false) restrict regexps to POSIX egrep syntax
+//   longest_match    (false) search for longest match, not first match
+//   log_errors       (true)  log syntax and execution errors to ERROR
+//   max_mem          (see below)  approx. max memory footprint of RE2
+//   literal          (false) interpret string as literal, not regexp
+//   never_nl         (false) never match \n, even if it is in regexp
+//   dot_nl           (false) dot matches everything including new line
+//   never_capture    (false) parse all parens as non-capturing
+//   case_sensitive   (true)  match is case-sensitive (regexp can override
+//                              with (?i) unless in posix_syntax mode)
+//
+// The following options are only consulted when posix_syntax == true.
+// When posix_syntax == false, these features are always enabled and
+// cannot be turned off; to perform multi-line matching in that case,
+// begin the regexp with (?m).
+//   perl_classes     (false) allow Perl's \d \s \w \D \S \W
+//   word_boundary    (false) allow Perl's \b \B (word boundary and not)
+//   one_line         (false) ^ and $ only match beginning and end of text
+void regexp_like(StringRef *name, StringRef *pattern, StringRef *flags, bool *out, bool *is_null) {
+    if (name == nullptr || pattern == nullptr || flags == nullptr) {
+        out = nullptr;
+        *is_null = true;
+        return;
+    }
+
+    std::string_view flags_view(flags->data_, flags->size_);
+    std::string_view pattern_view(pattern->data_, pattern->size_);
+    std::string_view name_view(name->data_, name->size_);
+
+    RE2::Options opts(RE2::POSIX);
+    opts.set_log_errors(false);
+    opts.set_one_line(true);
+
+    for (auto &flag : flags_view) {
+        switch (flag) {
+            case 'c':
+                opts.set_case_sensitive(true);
+            break;
+            case 'i':
+                opts.set_case_sensitive(false);
+            break;
+            case 'm':
+                opts.set_one_line(false);
+            break;
+            case 'e':
+                // ignored here
+            break;
+            case 's':
+                opts.set_dot_nl(true);
+            break;
+            // ignore unknown flag
+        }
+    }
+
+    RE2 re(pattern_view, opts);
+    if (re.error_code() != 0) {
+        LOG(ERROR) << "Error parsing '" << pattern_view << "': " << re.error();
+        out = nullptr;
+        *is_null = true;
+        return;
+    }
+    *is_null = false;
+    *out = RE2::FullMatch(name_view, re);
+}
+
+void regexp_like(StringRef *name, StringRef *pattern, bool *out, bool *is_null) {
+    StringRef flags("c");
+    regexp_like(name, pattern, &flags, out, is_null);
+}
+
 void string_to_bool(StringRef *str, bool *out, bool *is_null_ptr) {
     if (nullptr == str) {
         *out = false;
@@ -534,109 +655,47 @@ void string_to_bool(StringRef *str, bool *out, bool *is_null_ptr) {
     return;
 }
 void string_to_int(StringRef *str, int32_t *out, bool *is_null_ptr) {
-    // init
-    *out = 0;
-    *is_null_ptr = true;
     if (nullptr == str) {
+        *is_null_ptr = true;
         return;
     }
-    if (0 == str->size_) {
-        return;
-    }
-    try {
-        // string -> integer
-        // std::string::size_type sz;  // alias of size_t
-        // *out = std::stoi(str->ToString(), &sz);
-        // if (sz < str->size_) {
-        //    *out = 0;
-        //    *is_null_ptr = true;
-        //    return;
-        //}
-        std::string str_obj = str->ToString();
-        const char *c_str = str_obj.c_str();
-        char *end;
-        *out = strtol(c_str, &end, 10);
-        if (end < c_str + str->size_) {
-            *out = 0;
-            *is_null_ptr = true;
-            return;
-        }
+    auto [s, ret] = StrToIntegral()(str->ToString());
+    if (s.ok() && ret <= INT32_MAX && ret >= INT32_MIN) {
         *is_null_ptr = false;
-    } catch (...) {
-        // error management
-        return;
+        *out = ret;
+    } else {
+        *is_null_ptr = true;
     }
-    return;
 }
 void string_to_smallint(StringRef *str, int16_t *out,
                         bool *is_null_ptr) {
-    // init
-    *out = 0;
-    *is_null_ptr = true;
     if (nullptr == str) {
+        *is_null_ptr = true;
         return;
     }
-    if (0 == str->size_) {
-        return;
-    }
-    try {
-        // string -> integer
-        // std::string::size_type sz;  // alias of size_t
-        // int i = std::stoi(str->ToString(), &sz);
-        // if (sz < str->size_) {
-        //    *is_null_ptr = true;
-        //    return;
-        // }
-        std::string str_obj = str->ToString();
-        const char *c_str = str_obj.c_str();
-        char *end;
-        int i = strtol(c_str, &end, 10);
-        if (end < c_str + str->size_) {
-            *is_null_ptr = true;
-            return;
-        }
-        *out = static_cast<int16_t>(i);
+
+    auto [s, ret] = StrToIntegral()(str->ToString());
+    if (s.ok() && ret >= INT16_MIN && ret <= INT16_MAX) {
         *is_null_ptr = false;
-    } catch (...) {
-        // error management
-        return;
+        *out = ret;
+    } else {
+        *is_null_ptr = true;
     }
-    return;
 }
+
 void string_to_bigint(StringRef *str, int64_t *out, bool *is_null_ptr) {
-    // init
-    *out = 0;
-    *is_null_ptr = true;
     if (nullptr == str) {
+        *is_null_ptr = true;
         return;
     }
-    if (0 == str->size_) {
-        return;
-    }
-    try {
-        // string -> integer
-        // std::string::size_type sz;  // alias of size_t
-        // *out = std::stol(str->ToString(), &sz);
-        // if (sz < str->size_) {
-        //   *out = 0;
-        //    *is_null_ptr = true;
-        //    return;
-        // }
-        std::string str_obj = str->ToString();
-        const char *c_str = str_obj.c_str();
-        char *end;
-        *out = strtoll(c_str, &end, 0);
-        if (end < c_str + str->size_) {
-            *out = 0;
-            *is_null_ptr = true;
-            return;
-        }
+
+    auto [s, ret] = StrToIntegral()(str->ToString());
+    if (s.ok()) {
         *is_null_ptr = false;
-    } catch (...) {
-        // error management
-        return;
+        *out = ret;
+    } else {
+        *is_null_ptr = true;
     }
-    return;
 }
 void string_to_float(StringRef *str, float *out, bool *is_null_ptr) {
     // init
@@ -708,10 +767,10 @@ void string_to_double(StringRef *str, double *out, bool *is_null_ptr) {
     }
     return;
 }
-void string_to_date(StringRef *str, Date *output,
-                    bool *is_null) {
+void string_to_date(StringRef *str, Date *output, bool *is_null) {
     if (19 == str->size_) {
         struct tm timeinfo;
+        memset(&timeinfo, 0, sizeof(struct tm));
         if (nullptr ==
             strptime(str->ToString().c_str(), "%Y-%m-%d %H:%M:%S", &timeinfo)) {
             *is_null = true;
@@ -761,11 +820,109 @@ void string_to_date(StringRef *str, Date *output,
     }
     return;
 }
+
+absl::StatusOr<absl::Time> string_to_time(absl::string_view ref) {
+    absl::string_view fmt = DATE_FMT_RF3399_FULL;
+    if (19 == ref.size()) {
+        fmt = DATE_FMT_YMDHMS;
+    } else if (10 == ref.size()) {
+        fmt = DATE_FMT_YMD_1;
+    } else if (8 == ref.size()) {
+        fmt = DATE_FMT_YMD_2;
+    }
+    absl::Time tm;
+    std::string err;
+    bool ret = absl::ParseTime(fmt, ref, &tm, &err);
+
+    if (!ret) {
+        return absl::InvalidArgumentError(err);
+    }
+    return tm;
+}
+
+void date_diff(Date *date1, Date *date2, int32_t *diff, bool *is_null) {
+    if (date1 == nullptr || date2 == nullptr || date1->date_ <= 0 || date2->date_ <= 0) {
+        *is_null = true;
+        return;
+    }
+    int32_t year, month, day;
+    if (!date1->Decode(date1->date_, &year, &month, &day)) {
+        *is_null = true;
+        return;
+    }
+    absl::CivilDay d1(year, month, day);
+    if (!date1->Decode(date2->date_, &year, &month, &day)) {
+        *is_null = true;
+        return;
+    }
+    absl::CivilDay d2(year, month, day);
+    *diff = (d1 - d2);
+    *is_null = false;
+}
+
+void date_diff(StringRef *date1, StringRef *date2, int32_t *diff, bool *is_null) {
+    auto t1 = string_to_time(absl::string_view(date1->data_, date1->size_));
+    if (!t1.ok()) {
+        *is_null = true;
+        return;
+    }
+    auto t2 = string_to_time(absl::string_view(date2->data_, date2->size_));
+    if (!t2.ok()) {
+        *is_null = true;
+        return;
+    }
+
+    auto d1 = absl::ToCivilDay(t1.value(), DEFAULT_TZ);
+    auto d2 = absl::ToCivilDay(t2.value(), DEFAULT_TZ);
+
+    *diff = d1 - d2;
+    *is_null = false;
+}
+
+void date_diff(StringRef *date1, Date *date2, int32_t *diff, bool *is_null) {
+    auto t1 = string_to_time(absl::string_view(date1->data_, date1->size_));
+    if (!t1.ok()) {
+        *is_null = true;
+        return;
+    }
+    auto d1 = absl::ToCivilDay(t1.value(), DEFAULT_TZ);
+
+    int32_t year, month, day;
+    if (!Date::Decode(date2->date_, &year, &month, &day)) {
+        *is_null = true;
+        return;
+    }
+    auto d2 = absl::CivilDay(year, month, day);
+
+    *diff = d1 - d2;
+    *is_null = false;
+}
+
+void date_diff(Date *date1, StringRef *date2, int32_t *diff, bool *is_null) {
+    auto t2 = string_to_time(absl::string_view(date2->data_, date2->size_));
+    if (!t2.ok()) {
+        *is_null = true;
+        return;
+    }
+    auto d2 = absl::ToCivilDay(t2.value(), DEFAULT_TZ);
+
+    int32_t year, month, day;
+    if (!Date::Decode(date1->date_, &year, &month, &day)) {
+        *is_null = true;
+        return;
+    }
+    auto d1 = absl::CivilDay(year, month, day);
+
+    *diff = d1 - d2;
+    *is_null = false;
+}
+
 // cast string to timestamp with yyyy-mm-dd or YYYY-mm-dd HH:MM:SS
 void string_to_timestamp(StringRef *str,
                          Timestamp *output, bool *is_null) {
     if (19 == str->size_) {
         struct tm timeinfo;
+        memset(&timeinfo, 0, sizeof(struct tm));
         if (nullptr ==
             strptime(str->ToString().c_str(), "%Y-%m-%d %H:%M:%S", &timeinfo)) {
             *is_null = true;
@@ -844,6 +1001,40 @@ void date_to_timestamp(Date *date, Timestamp *output,
         return;
     }
 }
+
+void date_to_unix_timestamp(Date *date, int64_t *output,
+                       bool *is_null) {
+    Timestamp ts;
+    date_to_timestamp(date, &ts, is_null);
+    if (*is_null) {
+        return;
+    }
+
+    *output = ts.ts_ / 1000;
+}
+
+// cast string to unix_timestamp with yyyy-mm-dd or YYYY-mm-dd HH:MM:SS
+void string_to_unix_timestamp(StringRef *str, int64_t *output, bool *is_null) {
+    if (str == nullptr || str->IsNull() || str->size_ == 0) {
+        *output = unix_timestamp();
+        *is_null = false;
+        return;
+    }
+
+    Timestamp ts;
+    string_to_timestamp(str, &ts, is_null);
+    if (*is_null) {
+        return;
+    }
+
+    *output = ts.ts_ / 1000;
+}
+
+int64_t unix_timestamp() {
+    std::time_t t = std::time(nullptr);
+    return t;
+}
+
 void sub_string(StringRef *str, int32_t from,
                 StringRef *output) {
     if (nullptr == output) {
@@ -894,6 +1085,42 @@ void sub_string(StringRef *str, int32_t from, int32_t len,
     output->size_ = static_cast<uint32_t>(len);
     return;
 }
+
+int32_t locate(StringRef *substr, StringRef *str) {
+    return locate(substr, str, 1);
+}
+
+int32_t locate(StringRef *substr, StringRef *str, int32_t pos) {
+    if (nullptr == substr || nullptr == str) {
+        return 0;
+    }
+    // negetive pos return 0 directly
+    if (pos <= 0) {
+        return 0;
+    }
+    uint32_t sub_size = substr->size_;
+    uint32_t size = str->size_;
+    // if substr is "" and pos <= len(str) + 1, return pos, other case return 0
+    if (pos + sub_size - 1 > size) {
+        return 0;
+    }
+    if (sub_size == 0) {
+        return pos;
+    }
+    for (uint32_t i = pos - 1; i <= size - sub_size; i++) {
+        uint32_t j = 0, k = i;
+        for (; j < sub_size; j++, k++) {
+            if (str->data_[k] != substr->data_[j]) {
+                break;
+            }
+        }
+        if (j == sub_size) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 int32_t strcmp(StringRef *s1, StringRef *s2) {
     if (s1 == s2) {
         return 0;
@@ -1116,6 +1343,10 @@ uint32_t format_string<StringRef>(const StringRef &v,
     }
 }
 
+void RegisterManagedObj(base::FeBaseObject* obj) {
+    vm::JitRuntime::get()->AddManagedObject(obj);
+}
+
 char *AllocManagedStringBuf(int32_t bytes) {
     if (bytes < 0) {
         return nullptr;
@@ -1208,6 +1439,69 @@ void delete_iterator(int8_t *input) {
     if (iter) {
         delete iter;
     }
+}
+
+int64_t FarmFingerprint(absl::string_view input) {
+    return absl::bit_cast<int64_t>(farmhash::Fingerprint64(input));
+}
+
+void printLog(const char* fmt) {
+    if (fmt) {
+        fprintf(stderr, "%s\n", fmt);
+    }
+}
+
+// each variadic arg is ArrayRef<StringRef>*
+void array_combine(codec::StringRef *del, int32_t cnt, ArrayRef<codec::StringRef> **data,
+                   ArrayRef<codec::StringRef> *out) {
+    std::vector<int> arr_szs(cnt, 0);
+    for (int32_t i = 0; i < cnt; ++i) {
+        auto arr = data[i];
+        arr_szs.at(i) = arr->size;
+    }
+
+    // cal cartesian products
+    auto products = hybridse::base::cartesian_product(arr_szs);
+
+    auto real_sz = products.size();
+    v1::AllocManagedArray(out, products.size());
+
+    for (int prod_idx = 0; prod_idx < products.size(); ++prod_idx) {
+        auto &prod = products.at(prod_idx);
+        int32_t sz = 0;
+        for (int i = 0; i < prod.size(); ++i) {
+            if (!data[i]->nullables[prod.at(i)]) {
+                // delimiter would be empty string if null
+                if (i > 0) {
+                    sz += del->size_;
+                }
+                sz += data[i]->raw[prod.at(i)]->size_;
+            } else {
+                // null exists in current product
+                // the only option now is to skip
+                real_sz--;
+                continue;
+            }
+        }
+        auto buf = v1::AllocManagedStringBuf(sz);
+        int32_t idx = 0;
+        for (int i = 0; i < prod.size(); ++i) {
+            if (!data[i]->nullables[prod.at(i)]) {
+                if (i > 0 && del->size_ > 0) {
+                    memcpy(buf + idx, del->data_, del->size_);
+                    idx += del->size_;
+                }
+                memcpy(buf + idx, data[i]->raw[prod.at(i)]->data_, data[i]->raw[prod.at(i)]->size_);
+                idx += data[i]->raw[prod.at(i)]->size_;
+            }
+        }
+
+        out->nullables[prod_idx] = false;
+        out->raw[prod_idx]->data_ = buf;
+        out->raw[prod_idx]->size_ = sz;
+    }
+
+    out->size = real_sz;
 }
 
 }  // namespace v1

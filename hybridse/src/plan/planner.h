@@ -25,12 +25,11 @@
 
 #include "absl/status/statusor.h"
 #include "base/fe_status.h"
-#include "gflags/gflags.h"
-#include "glog/logging.h"
 #include "node/node_manager.h"
 #include "node/plan_node.h"
 #include "node/sql_node.h"
 #include "proto/fe_type.pb.h"
+
 namespace hybridse {
 namespace plan {
 
@@ -48,6 +47,7 @@ class Planner {
     virtual ~Planner() {}
     virtual base::Status CreatePlanTree(const NodePointVector &parser_trees,
                                         PlanNodeList &plan_trees) = 0;  // NOLINT (runtime/references)
+
     static base::Status TransformTableDef(const std::string &table_name, const NodePointVector &column_desc_list,
                                           type::TableDef *table);
     bool MergeWindows(const std::map<const node::WindowDefNode *, node::ProjectListNode *> &map,
@@ -55,18 +55,33 @@ class Planner {
 
     static int GetPlanTreeLimitCount(node::PlanNode *node);
 
+    /// Prepare plan node for request mode (or batch request mode):
+    /// - verify the plan node for supported OPs
+    ///
+    /// \param node Plan node tree going to validate.
+    static base::Status PreparePlanForRequestMode(node::PlanNode *node) ABSL_ATTRIBUTE_NONNULL();
+
  protected:
+    template <typename NodeType, typename OutputType, typename ConvertFn>
+    ABSL_MUST_USE_RESULT base::Status ConvertGuard(const node::SqlNode *node, OutputType **output, ConvertFn &&func) {
+        auto specific_node = dynamic_cast<std::add_pointer_t<std::add_const_t<NodeType>>>(node);
+        CHECK_TRUE(specific_node != nullptr, common::kUnsupportSql, "unable to cast");
+        return func(specific_node, node_manager_, output);
+    }
+
+    static absl::StatusOr<node::TablePlanNode *> IsTable(node::PlanNode *node);
+    static base::Status PrepareRequestTable(node::PlanNode *node,
+                                            std::vector<node::TablePlanNode *> &request_tables);  // NOLINT
+    static base::Status ValidateOnlineServingOp(node::PlanNode *node);
+    static base::Status ValidateClusterOnlineTrainingOp(node::PlanNode *node);
+
     // expand pure history window to current history window.
     // currently only apply to rows window
     bool ExpandCurrentHistoryWindow(std::vector<const node::WindowDefNode *> *windows);
-    bool IsTable(node::PlanNode *node, node::PlanNode **output);
-    base::Status ValidateRequestTable(node::PlanNode *node, std::vector<node::PlanNode *> &request_tables);  // NOLINT
-    base::Status ValidateOnlineServingOp(node::PlanNode *node);
-    base::Status ValidateClusterOnlineTrainingOp(node::PlanNode *node);
     base::Status CheckWindowFrame(const node::WindowDefNode *w_ptr);
-    base::Status CreateQueryPlan(const node::QueryNode *root, PlanNode **plan_tree);
-    base::Status CreateSelectQueryPlan(const node::SelectQueryNode *root, PlanNode **plan_tree);
-    base::Status CreateUnionQueryPlan(const node::UnionQueryNode *root, PlanNode **plan_tree);
+    base::Status CreateQueryPlan(const node::QueryNode *root, node::QueryPlanNode **plan_tree);
+    base::Status CreateSelectQueryPlan(const node::SelectQueryNode *root, node::PlanNode **plan_tree);
+    base::Status CreateSetOperationPlan(const node::SetOperationNode *root, node::SetOperationPlanNode **plan_tree);
     base::Status CreateCreateTablePlan(const node::SqlNode *root, node::PlanNode **output);
     base::Status CreateTableReferencePlanNode(const node::TableRefNode *root, node::PlanNode **output);
     base::Status CreateCmdPlan(const SqlNode *root, node::PlanNode **output);
@@ -116,9 +131,11 @@ class SimplePlanner : public Planner {
                   bool enable_batch_window_parallelization = true,
                   const std::unordered_map<std::string, std::string>* extra_options = nullptr)
         : Planner(manager, is_batch_mode, is_cluster_optimized, enable_batch_window_parallelization, extra_options) {}
-    ~SimplePlanner() {}
+    ~SimplePlanner() override {}
+
+ protected:
     base::Status CreatePlanTree(const NodePointVector &parser_trees,
-                                PlanNodeList &plan_trees);  // NOLINT
+                                PlanNodeList &plan_trees) override;  // NOLINT
 };
 
 }  // namespace plan

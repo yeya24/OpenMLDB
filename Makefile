@@ -34,6 +34,9 @@ endif
 ifdef SQL_JAVASDK_ENABLE
     OPENMLDB_CMAKE_FLAGS += -DSQL_JAVASDK_ENABLE=$(SQL_JAVASDK_ENABLE)
 endif
+ifdef INSTALL_CXXSDK
+	OPENMLDB_CMAKE_FLAGS += -DINSTALL_CXXSDK=$(INSTALL_CXXSDK)
+endif
 ifdef TESTING_ENABLE
     OPENMLDB_CMAKE_FLAGS += -DTESTING_ENABLE=$(TESTING_ENABLE)
 endif
@@ -45,6 +48,9 @@ ifdef TCMALLOC_ENABLE
 endif
 ifdef COVERAGE_ENABLE
     OPENMLDB_CMAKE_FLAGS += -DCOVERAGE_ENABLE=$(COVERAGE_ENABLE)
+endif
+ifdef COVERAGE_NO_DEPS
+    OPENMLDB_CMAKE_FLAGS += -DCOVERAGE_NO_DEPS=$(COVERAGE_NO_DEPS)
 endif
 ifdef SANITIZER_ENABLE
     OPENMLDB_CMAKE_FLAGS += -DSANITIZER_ENABLE=$(SANITIZER_ENABLE)
@@ -84,7 +90,7 @@ endif
 TEST_TARGET ?=
 TEST_LEVEL ?=
 
-.PHONY: all coverage coverage-cpp coverage-java build test configure clean thirdparty-fast thirdparty openmldb-clean thirdparty-configure thirdparty-clean thirdpartybuild-clean thirdpartysrc-clean
+.PHONY: all coverage coverage-cpp coverage-java build test configure clean thirdparty-fast udf_doc_gen thirdparty openmldb-clean thirdparty-configure thirdparty-clean thirdpartybuild-clean thirdpartysrc-clean
 
 all: build
 
@@ -114,7 +120,7 @@ install: build
 
 test: build
 	# NOTE: some test require zookeeper start first, it should fixed
-	sh ./steps/ut_zookeeper.sh start
+	sh ./steps/ut_zookeeper.sh reset
 	$(CMAKE_PRG) --build $(OPENMLDB_BUILD_DIR) --target test -- -j$(NPROC)
 	sh ./steps/ut_zookeeper.sh stop
 
@@ -125,33 +131,47 @@ openmldb-clean:
 	rm -rf "$(OPENMLDB_BUILD_DIR)"
 	@cd java && ./mvnw clean
 
+udf_doc_gen:
+	$(MAKE) build OPENMLDB_BUILD_TARGET=export_udf_info
+	$(MAKE) -C ./hybridse/tools/documentation/udf_doxygen
+
 THIRD_PARTY_BUILD_DIR ?= $(MAKEFILE_DIR)/.deps
 THIRD_PARTY_SRC_DIR ?= $(MAKEFILE_DIR)/thirdsrc
 THIRD_PARTY_DIR ?= $(THIRD_PARTY_BUILD_DIR)/usr
 
-# trick: for those compile inside hybridsql docker image, thirdparty is pre-installed in /deps/usr.
-#  we check this by asserting if the environment variable '$THIRD_PARTY_DIR' is defined to '/deps/usr',
-#  if true, thirdparty download is skipped
-# zetasql check separately since it update more frequently:
-#  it will updated if the variable '$ZETASQL_VERSION' (defined in docker) not equal to that defined in current code
-override GREP_PATTERN = "set(ZETASQL_VERSION"
+override ZETASQL_PATTERN = "set(ZETASQL_VERSION"
+override THIRD_PATTERN = "set(HYBRIDSQL_ASSERTS_VERSION"
+new_zetasql_version := $(shell grep $(ZETASQL_PATTERN) third-party/cmake/FetchZetasql.cmake | sed 's/[^0-9.]*\([0-9.]*\).*/\1/')
+new_third_version := $(shell grep $(THIRD_PATTERN) third-party/CMakeLists.txt | sed 's/[^0-9.]*\([0-9.]*\).*/\1/')
+
 thirdparty-fast:
 	@if [ $(THIRD_PARTY_DIR) != "/deps/usr" ] ; then \
 	    echo "[deps]: install thirdparty and zetasql"; \
 	    $(MAKE) thirdparty; \
-	elif [ -n "$(ZETASQL_VERSION)" ]; then \
-	    new_zetasql_version=$(shell grep $(GREP_PATTERN) third-party/cmake/FetchZetasql.cmake | sed 's/[^0-9.]*\([0-9.]*\).*/\1/'); \
-	    if [ "$$new_zetasql_version" != "$(ZETASQL_VERSION)" ] ; then \
-		echo "[deps]: thirdparty up-to-date. reinstall zetasql from $(ZETASQL_VERSION) to $$new_zetasql_version"; \
-		$(MAKE) thirdparty-configure; \
-		$(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target zetasql; \
-	    else \
-		echo "[deps]: all up-to-date. zetasql already installed with version: $(ZETASQL_VERSION)"; \
-	    fi; \
 	else \
-	    echo "[deps]: install zetasql only"; \
 	    $(MAKE) thirdparty-configure; \
-	    $(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target zetasql; \
+	    if [ -n "$(ZETASQL_VERSION)" ] ; then \
+		if [ "$(new_zetasql_version)" != "$(ZETASQL_VERSION)" ] ; then \
+		    echo "[deps]: installing zetasql from $(ZETASQL_VERSION) to $(new_zetasql_version)"; \
+		    $(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target zetasql; \
+		else \
+		    echo "[deps]: zetasql up-to-date with version: $(ZETASQL_VERSION)"; \
+		fi; \
+	    else \
+		echo "[deps]: installing latest zetasql"; \
+		$(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target zetasql; \
+	    fi;  \
+	    if [ -n "$(THIRDPARTY_VERSION)" ]; then \
+		if [ "$(new_third_version)" != "$(THIRDPARTY_VERSION)" ] ; then \
+		    echo "[deps]: installing thirdparty from $(THIRDPARTY_VERSION) to $(new_third_version)"; \
+		    $(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target hybridsql-asserts; \
+		else \
+		    echo "[deps]: thirdparty up-to-date: $(THIRDPARTY_VERSION)"; \
+		fi ; \
+	    else \
+		echo "[deps]: installing latest thirdparty"; \
+		$(CMAKE_PRG) --build $(THIRD_PARTY_BUILD_DIR) --target hybridsql-asserts; \
+	    fi ; \
 	fi
 
 # third party compiled code install to 'OpenMLDB/.deps/usr', source code install to 'OpenMLDB/thirdsrc'

@@ -1,4 +1,4 @@
-# Operations in CLI
+# Operations CLI
 
 * [NS Client](#ns-client)
 * [Tablet Client](#tablet-client)
@@ -154,6 +154,8 @@ partition migrate ok
 partition migrate ok
 ```
 
+**Note**: A leader partition cannot be migrated. If you would like to do so, you have to use the command `changeleader` first to change the role of the leader to a follower.
+
 ### confget
 
 Get configuration information, currently only supports auto\_failover
@@ -283,6 +285,22 @@ Command format: `cancelop op\_id`
 Cancel op ok!
 ```
 
+### deleteop
+
+Delete one or more op from nameserver
+
+Command format: deleteop op\_id / op\_status
+
+* op\_id: the operation ID to delete
+* op\_status: specify the status of the op that needs to be deleted. The statuses that can be specified are done, failed and canceled
+
+```
+> deleteop 5
+Delete op ok!
+> deleteop done
+Delete op ok!
+```
+
 ### showopstatus
 
 Display operation execution information
@@ -383,7 +401,7 @@ $ ./openmldb --endpoint=172.27.2.52:9520 --role=client
 
 ### loadtable
 
-1. Load an existing table
+Load an existing table, only support memory table
 
 Command format: `loadtable table_name tid pid ttl segment_cnt`
 

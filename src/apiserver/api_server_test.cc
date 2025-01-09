@@ -24,8 +24,13 @@
 #include "butil/logging.h"
 #include "gflags/gflags.h"
 #include "gtest/gtest.h"
-#include "json2pb/rapidjson.h"
+#include "rapidjson/error/en.h"
+#include "rapidjson/rapidjson.h"
 #include "sdk/mini_cluster.h"
+#include "test/util.h"
+
+DEFINE_int32(zk_port, 6181, "zk port");
+DEFINE_string(api_server_port, "8084", "api server port");
 
 namespace openmldb::apiserver {
 
@@ -40,17 +45,18 @@ class APIServerTestEnv : public testing::Environment {
         ::hybridse::vm::Engine::InitializeGlobalLLVM();
         FLAGS_zk_session_timeout = 100000;
 
-        mc = std::make_shared<sdk::MiniCluster>(6181);
+        mc = std::make_shared<sdk::MiniCluster>(FLAGS_zk_port);
         ASSERT_TRUE(mc->SetUp()) << "Fail to set up mini cluster";
 
-        sdk::ClusterOptions cluster_options;
-        cluster_options.zk_cluster = mc->GetZkCluster();
-        cluster_options.zk_path = mc->GetZkPath();
-        // Owned by queue_svc
+        auto cluster_options = std::make_shared<sdk::SQLRouterOptions>();;
+        cluster_options->zk_cluster = mc->GetZkCluster();
+        cluster_options->zk_path = mc->GetZkPath();
+        // Owned by server_process
+
         cluster_sdk = new ::openmldb::sdk::ClusterSDK(cluster_options);
         ASSERT_TRUE(cluster_sdk->Init()) << "Fail to connect to db";
-        queue_svc = std::make_shared<APIServerImpl>();
-        ASSERT_TRUE(queue_svc->Init(cluster_sdk));
+        server_process = std::make_shared<APIServerImpl>("127.0.0.1:8010");  // fake endpoint for metrics
+        ASSERT_TRUE(server_process->Init(cluster_sdk));
 
         sdk::SQLRouterOptions sql_opt;
         sql_opt.zk_session_timeout = 30000;
@@ -60,11 +66,12 @@ class APIServerTestEnv : public testing::Environment {
         cluster_remote = sdk::NewClusterSQLRouter(sql_opt);
 
         // Http server set up
-        ASSERT_TRUE(server.AddService(queue_svc.get(), brpc::SERVER_DOESNT_OWN_SERVICE, "/* => Process") == 0)
-            << "Fail to add queue_svc";
+        ASSERT_TRUE(server.AddService(server_process.get(), brpc::SERVER_DOESNT_OWN_SERVICE, "/* => Process") == 0)
+            << "Fail to add server_process";
 
         // Start the server.
-        int api_server_port = 8010;
+        api_server_url = "http://127.0.0.1:" + FLAGS_api_server_port;
+        int api_server_port = std::stoi(FLAGS_api_server_port);
         brpc::ServerOptions server_options;
         // options.idle_timeout_sec = FLAGS_idle_timeout_s;
         ASSERT_TRUE(server.Start(api_server_port, &server_options) == 0) << "Fail to start HttpServer";
@@ -73,12 +80,11 @@ class APIServerTestEnv : public testing::Environment {
         ASSERT_TRUE(cluster_remote != nullptr);
         cluster_remote->ExecuteSQL("SET @@execute_mode='online';", &status);
 
-        db = "api_server_test";
-        cluster_remote->DropDB(db, &status);
+        db = "api_server_test" + std::to_string(std::rand());
         cluster_remote->CreateDB(db, &status);
         std::vector<std::string> dbs;
-        ASSERT_TRUE(cluster_remote->ShowDB(&dbs, &status));
-        ASSERT_TRUE(std::find(dbs.begin(), dbs.end(), db) != dbs.end());
+        ASSERT_TRUE(cluster_remote->ShowDB(&dbs, &status)) << "Fail to show dbs";
+        ASSERT_TRUE(std::find(dbs.begin(), dbs.end(), db) != dbs.end()) << "Fail to create db";
 
         brpc::ChannelOptions options;
         options.protocol = "http";
@@ -90,18 +96,22 @@ class APIServerTestEnv : public testing::Environment {
 
     void TearDown() override {
         std::cout << "Environment TearDown!" << std::endl;
+        // just try to clean up
         hybridse::sdk::Status status;
-        cluster_remote->DropDB(db, &status);
+        cluster_remote->ExecuteSQL("drop database " + db, &status);
         server.Stop(0);
         server.Join();
         mc->Close();
     }
 
-    std::string db;
     ::openmldb::sdk::DBSDK* cluster_sdk = nullptr;
     std::shared_ptr<sdk::MiniCluster> mc;
-    std::shared_ptr<APIServerImpl> queue_svc;
+    std::string api_server_url;
+    std::shared_ptr<APIServerImpl> server_process;
     brpc::Server server;
+    std::string db;
+
+    // http client for api server
     brpc::Channel http_channel;
     std::shared_ptr<sdk::SQLRouter> cluster_remote;
 
@@ -117,7 +127,8 @@ class APIServerTest : public ::testing::Test {
 };
 
 TEST_F(APIServerTest, jsonFormat) {
-    butil::rapidjson::Document document;
+    // test raw document
+    rapidjson::Document document;
 
     // Check the format of put request
     if (document
@@ -127,7 +138,7 @@ TEST_F(APIServerTest, jsonFormat) {
     ]
     })")
             .HasParseError()) {
-        ASSERT_TRUE(false) << "json parse failed with code " << document.GetParseError();
+        ASSERT_TRUE(false) << "json parse failed: " << rapidjson::GetParseError_En(document.GetParseError());
     }
 
     hybridse::sdk::Status status;
@@ -136,13 +147,219 @@ TEST_F(APIServerTest, jsonFormat) {
     ASSERT_EQ(1, value.Size());
     const auto& arr = value[0];
     ASSERT_EQ(7, arr.Size());
-    ASSERT_EQ(butil::rapidjson::kStringType, arr[0].GetType());
-    ASSERT_EQ(butil::rapidjson::kNumberType, arr[1].GetType());
-    ASSERT_EQ(butil::rapidjson::kNumberType, arr[2].GetType());
-    ASSERT_EQ(butil::rapidjson::kStringType, arr[3].GetType());
-    ASSERT_EQ(butil::rapidjson::kNumberType, arr[4].GetType());
-    ASSERT_EQ(butil::rapidjson::kTrueType, arr[5].GetType());
-    ASSERT_EQ(butil::rapidjson::kNullType, arr[6].GetType());
+    ASSERT_EQ(rapidjson::kStringType, arr[0].GetType());
+    ASSERT_EQ(rapidjson::kNumberType, arr[1].GetType());
+    ASSERT_EQ(rapidjson::kNumberType, arr[2].GetType());
+    ASSERT_EQ(rapidjson::kStringType, arr[3].GetType());
+    ASSERT_EQ(rapidjson::kNumberType, arr[4].GetType());
+    ASSERT_EQ(rapidjson::kTrueType, arr[5].GetType());
+    ASSERT_EQ(rapidjson::kNullType, arr[6].GetType());
+
+    // raw document with default flags can't parse unquoted nan&inf
+    ASSERT_TRUE(document.Parse("[NaN,Infinity]").HasParseError());
+    ASSERT_EQ(rapidjson::kParseErrorValueInvalid, document.GetParseError()) << document.GetParseError();
+
+    // test json reader
+    // can read inf number to inf
+    {
+        JsonReader reader("1.797693134862316e308");
+        ASSERT_TRUE(reader);
+        double d_res = -1.0;
+        reader >> d_res;
+        ASSERT_EQ(0x7ff0000000000000, *reinterpret_cast<uint64_t*>(&d_res))
+            << std::hex << std::setprecision(16) << *reinterpret_cast<uint64_t*>(&d_res);
+        ASSERT_TRUE(std::isinf(d_res));
+    }
+
+    // read unquoted inf&nan, legal words
+    {
+        JsonReader reader("[NaN, Inf, -Inf, Infinity, -Infinity]");
+        ASSERT_TRUE(reader);
+        double d_res = -1.0;
+        reader.StartArray();
+        reader >> d_res;
+        ASSERT_TRUE(std::isnan(d_res));
+        // nan hex
+        reader >> d_res;
+        ASSERT_TRUE(std::isinf(d_res));
+        reader >> d_res;
+        ASSERT_TRUE(std::isinf(d_res));
+        reader >> d_res;
+        ASSERT_TRUE(std::isinf(d_res));
+        reader >> d_res;
+        ASSERT_TRUE(std::isinf(d_res));
+    }
+    {
+        // float nan inf
+        // IEEE 754 arithmetic allows cast nan/inf to float, so GetFloat is fine
+        JsonReader reader("[NaN, Infinity, -Infinity]");
+        ASSERT_TRUE(reader);
+        float f_res = -1.0;
+        reader.StartArray();
+        reader >> f_res;
+        ASSERT_TRUE(std::isnan(f_res));
+        reader >> f_res;
+        ASSERT_TRUE(std::isinf(f_res));
+        reader >> f_res;
+        ASSERT_TRUE(std::isinf(f_res));
+        // raw way for put and procedure(common cols)
+        f_res = -1.0;
+        rapidjson::Document document;
+        document.Parse<rapidjson::kParseNanAndInfFlag>("[NaN, Infinity, -Infinity]");
+        document.StartArray();
+        f_res = document[0].GetFloat();
+        ASSERT_TRUE(std::isnan(f_res));
+        f_res = document[1].GetFloat();
+        ASSERT_TRUE(std::isinf(f_res));
+        f_res = document[2].GetFloat();
+        ASSERT_TRUE(std::isinf(f_res));
+    }
+    {  // illegal words
+        JsonReader reader("nan");
+        ASSERT_FALSE(reader);
+    }
+    {  // illegal words
+        JsonReader reader("+Inf");
+        ASSERT_FALSE(reader);
+    }
+    {  // string, not double
+        JsonReader reader("\"NaN\"");
+        ASSERT_TRUE(reader);
+        double d = -1.0;
+        reader >> d;
+        ASSERT_FALSE(reader);      // get double failed
+        ASSERT_FLOAT_EQ(d, -1.0);  // won't change
+    }
+
+    // test json writer
+    JsonWriter writer;
+    // about double nan, inf
+    double nan = std::numeric_limits<double>::quiet_NaN();
+    double inf = std::numeric_limits<double>::infinity();
+    writer.StartArray();
+    writer << nan;
+    writer << inf;
+    double ninf = -inf;
+    writer << ninf;
+    writer.EndArray();
+    ASSERT_STREQ("[NaN,Infinity,-Infinity]", writer.GetString());
+}
+
+TEST_F(APIServerTest, reqParse) {
+    {
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "online"
+        })");
+        QueryReq req(query_reader);
+        ASSERT_TRUE(req.status().ok()) << req.status();
+        ASSERT_EQ("online", req.mode);
+        ASSERT_EQ("select c1, c2 from demo;", req.sql);
+    }
+
+    {
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline", "timeout": 1000, "write_nan_and_inf_null": true
+        })");
+        QueryReq req(query_reader);
+        ASSERT_TRUE(req.status().ok()) << req.status();
+        ASSERT_EQ(1000, req.timeout);
+        ASSERT_TRUE(req.write_nan_and_inf_null);
+    }
+
+    {
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline", "timeout": 1000, "write_nan_and_inf_null": true,
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", 1]
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_TRUE(req.status().ok()) << req.status();
+        ASSERT_EQ(2, req.parameter->GetSchema()->GetColumnCnt());
+        ASSERT_EQ(hybridse::sdk::DataType::kTypeString, req.parameter->GetSchema()->GetColumnType(0));
+        ASSERT_EQ(hybridse::sdk::DataType::kTypeInt32, req.parameter->GetSchema()->GetColumnType(1));
+    }
+
+    // failed cases
+    {
+        // different size of schema and data
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", 1, 2]
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_FALSE(req.status().ok()) << req.status();
+        ASSERT_STREQ("data size 3 != schema size 2", req.status().message().data());
+    }
+    {
+        // invalid data format: string -> int
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", "1"]
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_FALSE(req.status().ok()) << req.status();
+        ASSERT_STREQ("append failed on 1 type 3", req.status().message().data());
+    }
+    {
+        // invalid schema : FOO
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "FOO"],
+                "data": ["bb", 1]
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_FALSE(req.status().ok()) << req.status();
+        ASSERT_STREQ("invalid type FOO", req.status().message().data());
+    }
+    {
+        // mismatch on sql & parameter, won't fail here, but will fail in execute
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT"],
+                "data": ["bb", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_TRUE(req.status().ok()) << req.status();
+    }
+    {
+        // invalid json
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", "1"
+            }
+        })");
+        QueryReq req(query_reader);
+        ASSERT_FALSE(req.status().ok()) << req.status();
+        ASSERT_STREQ("req is not object", req.status().message().data());
+    }
+    {
+        // valid json, but wrong format of field(timeout is int)
+        JsonReader query_reader(R"({
+            "sql": "select c1, c2 from demo;", "mode": "offline",
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", 1]
+            },
+            "timeout": "1000"
+        })");
+        QueryReq req(query_reader);
+        ASSERT_FALSE(req.status().ok()) << req.status();
+        ASSERT_STREQ("timeout parse failed", req.status().message().data());
+    }
 }
 
 TEST_F(APIServerTest, query) {
@@ -159,7 +376,7 @@ TEST_F(APIServerTest, query) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db;
         cntl.request_attachment().append(R"({
             "sql": "select c1, c2 from demo;", "mode": "online"
         })");
@@ -168,17 +385,136 @@ TEST_F(APIServerTest, query) {
 
         LOG(INFO) << "exec query resp:\n" << cntl.response_attachment().to_string();
 
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << cntl.response_attachment().to_string();
         }
+
+        /*
+        {
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "schema": ["Int32", "String"],
+                "data": [[1, "bb"]]
+            }
+        }
+        */
         ASSERT_EQ(0, document["code"].GetInt());
         ASSERT_STREQ("ok", document["msg"].GetString());
-        ASSERT_EQ(1, document["data"].Size());
-        ASSERT_EQ(2, document["data"][0].Size());
-        ASSERT_EQ(1, document["data"][0][0].GetInt());
-        ASSERT_STREQ("bb", document["data"][0][1].GetString());
+        ASSERT_EQ(2, document["data"]["schema"].Size());
+        ASSERT_STREQ("Int32", document["data"]["schema"][0].GetString());
+        ASSERT_STREQ("String", document["data"]["schema"][1].GetString());
+        ASSERT_EQ(1, document["data"]["data"].Size());
+        ASSERT_EQ(2, document["data"]["data"][0].Size());
+        ASSERT_EQ(1, document["data"]["data"][0][0].GetInt());
+        ASSERT_STREQ("bb", document["data"]["data"][0][1].GetString());
+    }
+
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, "drop table demo;", &status));
+}
+
+TEST_F(APIServerTest, parameterizedQuery) {
+    const auto env = APIServerTestEnv::Instance();
+
+    std::string ddl = "create table demo (c1 int, c2 string);";
+    hybridse::sdk::Status status;
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, ddl, &status)) << "fail to create table";
+
+    std::string insert_sql = "insert into demo values (1, \"bb\");";
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+    ASSERT_TRUE(env->cluster_remote->ExecuteInsert(env->db, insert_sql, &status));
+    insert_sql = "insert into demo values (2, \"bb\");";
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+    ASSERT_TRUE(env->cluster_remote->ExecuteInsert(env->db, insert_sql, &status));
+
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db;
+        cntl.request_attachment().append(R"({
+            "sql": "select c1, c2 from demo where c2 = ?;",
+            "mode": "online", 
+            "input": {
+                "schema": ["STRING"],
+                "data": ["bb"]
+            }
+        })");
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+
+        LOG(INFO) << "exec query resp:\n" << cntl.response_attachment().to_string();
+
+        rapidjson::Document document;
+        if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
+            ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
+                               << ", raw resp: " << cntl.response_attachment().to_string();
+        }
+        /*
+        {
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "schema": ["Int32", "String"],
+                "data": [[1, "bb"], [2, "bb"]]
+            }
+        }
+        */
+        ASSERT_EQ(0, document["code"].GetInt());
+        ASSERT_STREQ("ok", document["msg"].GetString());
+        ASSERT_EQ(2, document["data"]["schema"].Size());
+        ASSERT_STREQ("Int32", document["data"]["schema"][0].GetString());
+        ASSERT_STREQ("String", document["data"]["schema"][1].GetString());
+        ASSERT_EQ(2, document["data"]["data"].Size());
+        ASSERT_EQ(2, document["data"]["data"][0].Size());
+        ASSERT_EQ(1, document["data"]["data"][0][0].GetInt());
+        ASSERT_STREQ("bb", document["data"]["data"][0][1].GetString());
+        ASSERT_EQ(2, document["data"]["data"][1].Size());
+        ASSERT_EQ(2, document["data"]["data"][1][0].GetInt());
+        ASSERT_STREQ("bb", document["data"]["data"][1][1].GetString());
+    }
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db;
+        cntl.request_attachment().append(R"({
+            "sql": "select c1, c2 from demo where c2 = ? and c1 = ?;",
+            "mode": "online",
+            "input": {
+                "schema": ["STRING", "INT"],
+                "data": ["bb", 1]
+            }
+        })");
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+
+        LOG(INFO) << "exec query resp:\n" << cntl.response_attachment().to_string();
+
+        rapidjson::Document document;
+        if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
+            ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
+                               << ", raw resp: " << cntl.response_attachment().to_string();
+        }
+        /*
+        {
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "schema": ["Int32", "String"],
+                "data": [[1, "bb"]]
+            }
+        }
+        */
+        ASSERT_EQ(0, document["code"].GetInt());
+        ASSERT_STREQ("ok", document["msg"].GetString());
+        ASSERT_EQ(2, document["data"]["schema"].Size());
+        ASSERT_STREQ("Int32", document["data"]["schema"][0].GetString());
+        ASSERT_STREQ("String", document["data"]["schema"][1].GetString());
+        ASSERT_EQ(1, document["data"]["data"].Size());
+        ASSERT_EQ(2, document["data"]["data"][0].Size());
+        ASSERT_EQ(1, document["data"]["data"][0][0].GetInt());
+        ASSERT_STREQ("bb", document["data"]["data"][0][1].GetString());
     }
 
     ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, "drop table demo;", &status));
@@ -213,7 +549,7 @@ TEST_F(APIServerTest, invalidPut) {
         JsonReader reader(cntl.response_attachment().to_string().c_str());
         reader >> resp;
     }
-    ASSERT_EQ(-1, resp.code);
+    ASSERT_EQ(2000, resp.code) << resp.msg;
     LOG(INFO) << resp.msg;
 
     // Invalid table
@@ -227,7 +563,7 @@ TEST_F(APIServerTest, invalidPut) {
         JsonReader reader(cntl.response_attachment().to_string().c_str());
         reader >> resp;
     }
-    ASSERT_EQ(-1, resp.code);
+    ASSERT_EQ(2000, resp.code) << resp.msg;
     LOG(INFO) << resp.msg;
 
     // Invalid pattern
@@ -263,13 +599,30 @@ TEST_F(APIServerTest, validPut) {
     ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, ddl, &status)) << status.msg;
     ASSERT_TRUE(env->cluster_sdk->Refresh());
 
+    // invalid date 2021-0 4-27
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
+        cntl.request_attachment().append(
+            "{\"value\": [[\"foo\", 111, 1.4,  \"2021-0 4-27\", 1620471840256, true, \"more str\", null]]}");
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+        GeneralResp resp;
+        JsonReader reader(cntl.response_attachment().to_string().c_str());
+        reader >> resp;
+        ASSERT_EQ(-1, resp.code) << resp.msg;
+        ASSERT_STREQ("convertion failed on col field4[7] with value 2021-0 4-27", resp.msg.c_str());
+    }
+
+    // valid data
     int insert_cnt = 10;
     for (int i = 0; i < insert_cnt; i++) {
         std::string key = "k" + std::to_string(i);
 
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         cntl.request_attachment().append("{\"value\": [[\"" + key +
                                          "\", 111, 1.4,  \"2021-04-27\", 1620471840256, true, \"more str\", null]]}");
         env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
@@ -304,7 +657,7 @@ TEST_F(APIServerTest, putCase1) {
     const auto env = APIServerTestEnv::Instance();
 
     // create table
-    std::string table = "put";
+    std::string table = "putCase1";
     std::string ddl = "create table if not exists " + table +
                       "(c1 string, "
                       "c3 int, "
@@ -317,7 +670,7 @@ TEST_F(APIServerTest, putCase1) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         cntl.request_attachment().append(R"({
         "value": [
             ["", 111, 1620471840256]
@@ -335,7 +688,7 @@ TEST_F(APIServerTest, putCase1) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         cntl.request_attachment().append(R"({
         "value": [
             ["drop table test1;", 111, 1620471840256]
@@ -353,7 +706,7 @@ TEST_F(APIServerTest, putCase1) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         // Invalid timestamp
         cntl.request_attachment().append(R"({
         "value": [
@@ -372,7 +725,7 @@ TEST_F(APIServerTest, putCase1) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         cntl.request_attachment().append(R"({
         "value": [
             ["中文", 111, 1620471840256]
@@ -391,7 +744,7 @@ TEST_F(APIServerTest, putCase1) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_PUT);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/tables/" + table;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/tables/" + table;
         cntl.request_attachment().append(R"({
         "value": [
             [null, 111, 1620471840256]
@@ -446,12 +799,12 @@ TEST_F(APIServerTest, procedure) {
 
     // show procedure
     brpc::Controller show_cntl;  // default is GET
-    show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+    show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
     env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
     ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
     LOG(INFO) << "get sp resp: " << show_cntl.response_attachment();
 
-    butil::rapidjson::Document document;
+    rapidjson::Document document;
     if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
         ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                            << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -467,7 +820,7 @@ TEST_F(APIServerTest, procedure) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
         cntl.request_attachment().append(R"({
         "common_cols":["bb", 23, 1590738994000],
         "input": [[123, 5.1, 6.1, "2021-08-01"],[234, 5.2, 6.2, "2021-08-02"]],
@@ -493,7 +846,7 @@ TEST_F(APIServerTest, procedure) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
         cntl.request_attachment().append(R"({
         "common_cols":["bb", 23, 1590738994000],
         "input": [[123, 5.1, 6.1, "2021-08-01"],[234, 5.2, 6.2, "2021-08-02"]],
@@ -516,10 +869,93 @@ TEST_F(APIServerTest, procedure) {
         ASSERT_EQ(2, document["data"]["common_cols_data"].Size());
     }
 
+    // invalid date
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
+        cntl.request_attachment().append(R"({
+        "common_cols":["bb", 23, 1590738994000],
+        "input": [[123, 5.1, 6.1, "20 21-08-01"],[234, 5.2, 6.2, "2021-08-0 2"]],
+    })");
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+
+        LOG(INFO) << "exec procedure resp:\n" << cntl.response_attachment().to_string();
+
+        // check resp data
+        if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
+            ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
+                               << ", raw resp: " << cntl.response_attachment().to_string();
+        }
+        ASSERT_EQ(-1, document["code"].GetInt());
+        ASSERT_STREQ("Request body json parse failed", document["msg"].GetString());
+    }
+
     // drop procedure and table
     std::string drop_sp_sql = "drop procedure " + sp_name + ";";
     ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, drop_sp_sql, &status));
     ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, "drop table trans;", &status));
+}
+
+TEST_F(APIServerTest, testResultType) {
+    // check about json write
+    const auto env = APIServerTestEnv::Instance();
+    // don't need table data
+    std::string ddl =
+        "create table if not exists multi_type(c1 bool, c2 smallint, c3 int, c4 bigint, c5 float, c6 double, c7 "
+        "string, c8 date, c9 timestamp, c10_str string);";
+    hybridse::sdk::Status status;
+
+    env->cluster_remote->ExecuteSQL(env->db, ddl, &status);
+    ASSERT_TRUE(status.IsOK()) << status.msg;
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+    std::string deploy = "deploy d1 select c1, c2, c3, c4, c5, c6, c7, c8, c9, c10_str from multi_type;";
+    env->cluster_remote->ExecuteSQL(env->db, deploy, &status);
+    ASSERT_TRUE(status.IsOK()) << status.msg;
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/deployments/" + "d1";
+        cntl.request_attachment().append(R"({
+        "input": 
+          [
+            [ true,32767,65535,9223372036854775807,1.1,2.2,"abc","2021-12-01",11111111111111,"def" ],
+            [ false,32767,65535,null,1.1,2.2,"abc",null,null,"def" ]
+          ]
+    })");  // null must be lower case
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+
+        LOG(INFO) << "exec deployment resp:\n" << cntl.response_attachment().to_string();
+        rapidjson::Document document;
+        // check resp data
+        if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
+            ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
+                               << ", raw resp: " << cntl.response_attachment().to_string();
+        }
+        ASSERT_EQ(0, document["code"].GetInt());
+        ASSERT_STREQ("ok", document["msg"].GetString());
+        ASSERT_TRUE(document["data"].FindMember("schema") == document["data"].MemberEnd());
+        ASSERT_EQ(2, document["data"]["data"].Size());
+        ASSERT_EQ(0, document["data"]["common_cols_data"].Size());
+
+        // check data.data 2 results
+        auto& data = document["data"]["data"];
+        ASSERT_TRUE(data[0].IsArray());
+        ASSERT_TRUE(data[0][0].GetBool());
+        ASSERT_EQ(data[0][2].GetInt(), 65535);
+        ASSERT_STREQ(data[0][7].GetString(), "2021-12-1");
+
+        ASSERT_TRUE(data[1].IsArray());
+        ASSERT_FALSE(data[1][0].GetBool());
+        ASSERT_TRUE(data[1][3].IsNull());
+    }
+
+    env->cluster_remote->ExecuteSQL(env->db, "drop deployment d1", &status);
+    ASSERT_TRUE(status.IsOK()) << status.msg;
 }
 
 TEST_F(APIServerTest, no_common) {
@@ -557,12 +993,12 @@ TEST_F(APIServerTest, no_common) {
 
     // show procedure
     brpc::Controller show_cntl;  // default is GET
-    show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+    show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
     env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
     ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
     LOG(INFO) << "get sp resp: " << show_cntl.response_attachment();
 
-    butil::rapidjson::Document document;
+    rapidjson::Document document;
     if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
         ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                            << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -577,7 +1013,7 @@ TEST_F(APIServerTest, no_common) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/deployments/" + sp_name;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/deployments/" + sp_name;
         cntl.request_attachment().append(R"({
         "input": [["bb", 23, 123, 5.1, 6.1, 1590738994000, "2021-08-01"],
                   ["bb", 23, 234, 5.2, 6.2, 1590738994000, "2021-08-02"]],
@@ -644,12 +1080,12 @@ TEST_F(APIServerTest, no_common_not_first_string) {
 
     // show procedure
     brpc::Controller show_cntl;  // default is GET
-    show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+    show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
     env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
     ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
     LOG(INFO) << "get sp resp: " << show_cntl.response_attachment();
 
-    butil::rapidjson::Document document;
+    rapidjson::Document document;
     if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
         ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                            << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -664,7 +1100,7 @@ TEST_F(APIServerTest, no_common_not_first_string) {
     {
         brpc::Controller cntl;
         cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
-        cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + env->db + "/procedures/" + sp_name;
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
         cntl.request_attachment().append(R"({
         "input": [[11, "bb", 23, 123, 5.1, 6.1, 1590738994000, "2021-08-01"],
                   [11, "bb", 23, 234, 5.2, 6.2, 1590738994000, "2021-08-02"]],
@@ -696,7 +1132,7 @@ TEST_F(APIServerTest, no_common_not_first_string) {
 TEST_F(APIServerTest, getDBs) {
     const auto env = APIServerTestEnv::Instance();
     std::default_random_engine e;
-    std::string db_name = "" + std::to_string(e() % 100000);  // to avoid use exists db, e.g. api_server_test
+    std::string db_name = "getdb" + std::to_string(e() % 100000);  // to avoid use exists db, e.g. api_server_test
     LOG(INFO) << "test on db " << db_name;
 
     std::set<std::string> test_dbs = {db_name, "monkey", "shark", "zebra"};
@@ -704,9 +1140,9 @@ TEST_F(APIServerTest, getDBs) {
     std::set<std::string> exists_db_set;
     {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -732,13 +1168,13 @@ TEST_F(APIServerTest, getDBs) {
             env->cluster_remote->DropDB(db, &status);
             ASSERT_TRUE(env->cluster_remote->CreateDB(db, &status));
         }
-        env->queue_svc->Refresh();
+        env->server_process->Refresh();
 
         brpc::Controller show_cntl;
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -761,18 +1197,18 @@ TEST_F(APIServerTest, getDBs) {
 TEST_F(APIServerTest, getTables) {
     const auto env = APIServerTestEnv::Instance();
     std::default_random_engine e;
-    std::string db_name = "" + std::to_string(e() % 100000);  // to avoid use db which has tables
+    std::string db_name = "gettable" + std::to_string(e() % 100000);  // to avoid use db which has tables
     LOG(INFO) << "test on db " << db_name;
     // setup
     {
         hybridse::sdk::Status status;
         env->cluster_remote->CreateDB(db_name, &status);
-        env->queue_svc->Refresh();
+        env->server_process->Refresh();
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + db_name + "/tables";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + db_name + "/tables";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -800,10 +1236,10 @@ TEST_F(APIServerTest, getTables) {
     }
     {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + db_name + "/tables";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + db_name + "/tables";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -825,10 +1261,10 @@ TEST_F(APIServerTest, getTables) {
     }
     {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/db_not_exist/tables";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/db_not_exist/tables";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -838,10 +1274,10 @@ TEST_F(APIServerTest, getTables) {
     }
     for (auto table : tables) {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + db_name + "/tables/" + table;
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + db_name + "/tables/" + table;
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -854,10 +1290,10 @@ TEST_F(APIServerTest, getTables) {
     }
     {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/" + db_name + "/tables/not_exist";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + db_name + "/tables/not_exist";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -867,10 +1303,10 @@ TEST_F(APIServerTest, getTables) {
     }
     {
         brpc::Controller show_cntl;  // default is GET
-        show_cntl.http_request().uri() = "http://127.0.0.1:8010/dbs/db_not_exist/tables/apple";
+        show_cntl.http_request().uri() = env->api_server_url + "/dbs/db_not_exist/tables/apple";
         env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
         ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
-        butil::rapidjson::Document document;
+        rapidjson::Document document;
         if (document.Parse(show_cntl.response_attachment().to_string().c_str()).HasParseError()) {
             ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
                                << ", raw resp: " << show_cntl.response_attachment().to_string();
@@ -879,17 +1315,104 @@ TEST_F(APIServerTest, getTables) {
         ASSERT_STREQ("DB not found", document["msg"].GetString());
     }
     for (auto table : tables) {
-        env->cluster_remote->ExecuteDDL(env->db, "drop table " + table + ";", &status);
+        env->cluster_remote->ExecuteDDL(db_name, "drop table " + table + ";", &status);
         ASSERT_TRUE(env->cluster_sdk->Refresh());
     }
     env->cluster_remote->DropDB(db_name, &status);
 }
 
+TEST_F(APIServerTest, jsonInput) {
+    const auto env = APIServerTestEnv::Instance();
+
+    std::string table = "json_test";
+    // create table, no c2
+    std::string ddl = "create table " + table +
+                      "(c1 string,\n"
+                      "c3 int,\n"
+                      "c4 bigint,\n"
+                      "c5 float,\n"
+                      "c6 double,\n"
+                      "c7 timestamp,\n"
+                      "c8 date,\n"
+                      "index(key=c1, ts=c7));";
+    hybridse::sdk::Status status;
+    env->cluster_remote->ExecuteDDL(env->db, "drop table " + table, &status);
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, ddl, &status)) << "fail to create table";
+
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+    // insert
+    std::string insert_sql = "insert into " + table + " values(\"bb\",24,34,1.5,2.5,1590738994000,\"2020-05-05\");";
+    ASSERT_TRUE(env->cluster_remote->ExecuteInsert(env->db, insert_sql, &status));
+    // create procedure
+    std::string sp_name = "json_deploy";
+    std::string sql = "SELECT c1, c3, sum(c4) OVER w1 as w1_c4_sum FROM " + table +
+                      " WINDOW w1 AS"
+                      " (PARTITION BY c1 ORDER BY c7 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW);";
+    std::string sp_ddl = "create procedure " + sp_name +
+                         " (c1 string, c3 int, c4 bigint, c5 float, c6 double, c7 timestamp, c8 date" + ")" +
+                         " begin " + sql + " end;";
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, sp_ddl, &status)) << "fail to create procedure";
+    ASSERT_TRUE(env->cluster_sdk->Refresh());
+
+    // show procedure
+    brpc::Controller show_cntl;  // default is GET
+    show_cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/procedures/" + sp_name;
+    env->http_channel.CallMethod(NULL, &show_cntl, NULL, NULL, NULL);
+    ASSERT_FALSE(show_cntl.Failed()) << show_cntl.ErrorText();
+    LOG(INFO) << "get sp resp: " << show_cntl.response_attachment();
+
+    // call sp in deployment api with json style input(won't check if it's a sp or deployment), so it'll have field
+    // `common_cols_data`
+    {
+        brpc::Controller cntl;
+        cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        cntl.http_request().uri() = env->api_server_url + "/dbs/" + env->db + "/deployments/" + sp_name;
+        cntl.request_attachment().append(R"({
+        "input": [{"c1":"bb", "c3":23, "c4":123, "c5":5.1, "c6":6.1, "c7":1590738994000, "c8":"2021-08-01"},
+                  {"c1":"bb", "c3":23, "c4":234, "c5":5.2, "c6":6.2, "c7":1590738994000, "c8":"2021-08-02"}]
+    })");
+        env->http_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+
+        LOG(INFO) << "exec deployment resp:\n" << cntl.response_attachment().to_string();
+        rapidjson::Document document;
+        // check resp data
+        if (document.Parse(cntl.response_attachment().to_string().c_str()).HasParseError()) {
+            ASSERT_TRUE(false) << "response parse failed with code " << document.GetParseError()
+                               << ", raw resp: " << cntl.response_attachment().to_string();
+        }
+        ASSERT_EQ(0, document["code"].GetInt());
+        ASSERT_STREQ("ok", document["msg"].GetString());
+        ASSERT_TRUE(document["data"].FindMember("schema") == document["data"].MemberEnd());
+        ASSERT_EQ(2, document["data"]["data"].Size());
+        ASSERT_EQ(0, document["data"]["common_cols_data"].Size());
+
+        // check data.data 2 results
+        auto& data = document["data"]["data"];
+        ASSERT_TRUE(data[0].IsObject());
+        ASSERT_STREQ(data[0].FindMember("c1")->value.GetString(), "bb");
+        ASSERT_EQ(data[0].FindMember("c3")->value.GetInt(), 23);
+        ASSERT_EQ(data[0].FindMember("w1_c4_sum")->value.GetInt64(), 157);  // 34 + 123
+
+        ASSERT_TRUE(data[1].IsObject());
+        ASSERT_STREQ(data[1].FindMember("c1")->value.GetString(), "bb");
+        ASSERT_EQ(data[1].FindMember("c3")->value.GetInt(), 23);
+        ASSERT_EQ(data[1].FindMember("w1_c4_sum")->value.GetInt64(), 268);  // 34 + 234
+    }
+
+    // drop procedure and table
+    std::string drop_sp_sql = "drop procedure " + sp_name + ";";
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, drop_sp_sql, &status));
+    ASSERT_TRUE(env->cluster_remote->ExecuteDDL(env->db, "drop table " + table, &status));
+}
 }  // namespace openmldb::apiserver
 
 int main(int argc, char* argv[]) {
     testing::AddGlobalTestEnvironment(openmldb::apiserver::APIServerTestEnv::Instance());
     ::testing::InitGoogleTest(&argc, argv);
     ::google::ParseCommandLineFlags(&argc, &argv, true);
+    ::openmldb::base::SetupGlog(true);
+    ::openmldb::test::InitRandomDiskFlags("api_server_test");
     return RUN_ALL_TESTS();
 }

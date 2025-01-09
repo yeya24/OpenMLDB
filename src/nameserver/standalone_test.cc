@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 #include "base/file_util.h"
-#include "base/glog_wapper.h"
+#include "base/glog_wrapper.h"
 #include "client/ns_client.h"
 #include "gtest/gtest.h"
 #include "nameserver/name_server_impl.h"
@@ -113,10 +113,8 @@ TEST_F(StandaloneTest, smoketestdisk) {
 int main(int argc, char** argv) {
     FLAGS_zk_session_timeout = 100000;
     ::testing::InitGoogleTest(&argc, argv);
-    srand(time(NULL));
     ::openmldb::base::SetLogLevel(INFO);
     ::google::ParseCommandLineFlags(&argc, &argv, true);
-    FLAGS_db_root_path = "/tmp/" + ::openmldb::test::GenRand();
-    FLAGS_hdd_root_path = "/tmp/hdd/" + ::openmldb::test::GenRand();
+    ::openmldb::test::InitRandomDiskFlags("standalone_test");
     return RUN_ALL_TESTS();
 }

@@ -15,12 +15,15 @@
  */
 
 #include "codegen/cast_expr_ir_builder.h"
+
 #include "codegen/date_ir_builder.h"
 #include "codegen/ir_base_builder.h"
 #include "codegen/string_ir_builder.h"
 #include "codegen/timestamp_ir_builder.h"
+#include "codegen/type_ir_builder.h"
 #include "glog/logging.h"
 #include "node/node_manager.h"
+#include "proto/fe_common.pb.h"
 
 using hybridse::common::kCodegenError;
 
@@ -63,8 +66,10 @@ bool CastExprIRBuilder::IsSafeCast(::llvm::Type* lhs, ::llvm::Type* rhs) {
 }
 Status CastExprIRBuilder::Cast(const NativeValue& value,
                                ::llvm::Type* cast_type, NativeValue* output) {
-    CHECK_STATUS(TypeIRBuilder::BinaryOpTypeInfer(node::ExprNode::IsCastAccept,
-                                                  value.GetType(), cast_type));
+    if (value.GetType() == cast_type) {
+        *output = value;
+        return {};
+    }
     if (IsSafeCast(value.GetType(), cast_type)) {
         CHECK_STATUS(SafeCast(value, cast_type, output));
     } else {
@@ -72,93 +77,94 @@ Status CastExprIRBuilder::Cast(const NativeValue& value,
     }
     return Status::OK();
 }
-Status CastExprIRBuilder::SafeCast(const NativeValue& value, ::llvm::Type* type,
-                                   NativeValue* output) {
+
+Status CastExprIRBuilder::SafeCast(const NativeValue& value, ::llvm::Type* dst_type, NativeValue* output) {
     ::llvm::IRBuilder<> builder(block_);
-    CHECK_TRUE(IsSafeCast(value.GetType(), type), kCodegenError,
-               "Safe cast fail: unsafe cast");
+    CHECK_TRUE(IsSafeCast(value.GetType(), dst_type), kCodegenError, "Safe cast fail: unsafe cast");
     Status status;
     if (value.IsConstNull()) {
-        if (TypeIRBuilder::IsStringPtr(type)) {
-            StringIRBuilder string_ir_builder(block_->getModule());
-            CHECK_STATUS(string_ir_builder.CreateNull(block_, output));
-            return base::Status::OK();
-        } else {
-            *output = NativeValue::CreateNull(type);
-        }
-    } else if (TypeIRBuilder::IsTimestampPtr(type)) {
+        // VOID type
+        auto res = CreateSafeNull(block_, dst_type);
+        CHECK_TRUE(res.ok(), kCodegenError, res.status().ToString());
+        *output = res.value();
+    } else if (TypeIRBuilder::IsTimestampPtr(dst_type)) {
         TimestampIRBuilder timestamp_ir_builder(block_->getModule());
         CHECK_STATUS(timestamp_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsDatePtr(type)) {
+    } else if (TypeIRBuilder::IsDatePtr(dst_type)) {
         DateIRBuilder date_ir_builder(block_->getModule());
         CHECK_STATUS(date_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsStringPtr(type)) {
+    } else if (TypeIRBuilder::IsStringPtr(dst_type)) {
         StringIRBuilder string_ir_builder(block_->getModule());
         CHECK_STATUS(string_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsNumber(type)) {
+    } else if (TypeIRBuilder::IsNumber(dst_type)) {
         Status status;
         ::llvm::Value* output_value = nullptr;
-        CHECK_TRUE(SafeCastNumber(value.GetValue(&builder), type, &output_value,
-                                  status),
-                   kCodegenError);
+        CHECK_TRUE(SafeCastNumber(value.GetValue(&builder), dst_type, &output_value, status), kCodegenError);
         if (value.IsNullable()) {
-            *output = NativeValue::CreateWithFlag(output_value,
-                                                  value.GetIsNull(&builder));
+            *output = NativeValue::CreateWithFlag(output_value, value.GetIsNull(&builder));
         } else {
             *output = NativeValue::Create(output_value);
         }
     } else {
-        return Status(common::kCodegenError,
-                      "Can't cast from " +
-                          TypeIRBuilder::TypeName(value.GetType()) + " to " +
-                          TypeIRBuilder::TypeName(type));
+        return Status(common::kCodegenError, "Can't cast from " + TypeIRBuilder::TypeName(value.GetType()) + " to " +
+                                                 TypeIRBuilder::TypeName(dst_type));
     }
     return Status::OK();
 }
-Status CastExprIRBuilder::UnSafeCast(const NativeValue& value,
-                                     ::llvm::Type* type, NativeValue* output) {
+
+Status CastExprIRBuilder::UnSafeCast(const NativeValue& value, ::llvm::Type* dst_type, NativeValue* output) {
     ::llvm::IRBuilder<> builder(block_);
-    if (value.IsConstNull()) {
-        if (TypeIRBuilder::IsStringPtr(type)) {
-            StringIRBuilder string_ir_builder(block_->getModule());
-            CHECK_STATUS(string_ir_builder.CreateNull(block_, output));
-            return base::Status::OK();
-        } else {
-            *output = NativeValue::CreateNull(type);
-        }
-    } else if (TypeIRBuilder::IsTimestampPtr(type)) {
+    node::NodeManager nm;
+    const node::TypeNode* src_node = nullptr;
+    const node::TypeNode* dst_node = nullptr;
+    CHECK_TRUE(GetFullType(&nm, value.GetType(), &src_node), kCodegenError);
+    CHECK_TRUE(GetFullType(&nm, dst_type, &dst_node), kCodegenError);
+
+    if (value.IsConstNull() || (TypeIRBuilder::IsNumber(dst_type) && TypeIRBuilder::IsDatePtr(value.GetType()))) {
+        // input is const null or (cast date to number)
+        auto res = CreateSafeNull(block_, dst_type);
+        CHECK_TRUE(res.ok(), kCodegenError, res.status().ToString());
+        *output = res.value();
+    } else if (TypeIRBuilder::IsTimestampPtr(dst_type)) {
         TimestampIRBuilder timestamp_ir_builder(block_->getModule());
         CHECK_STATUS(timestamp_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsDatePtr(type)) {
+    } else if (TypeIRBuilder::IsDatePtr(dst_type)) {
         DateIRBuilder date_ir_builder(block_->getModule());
         CHECK_STATUS(date_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsStringPtr(type)) {
+    } else if (TypeIRBuilder::IsStringPtr(dst_type)) {
         StringIRBuilder string_ir_builder(block_->getModule());
         CHECK_STATUS(string_ir_builder.CastFrom(block_, value, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsNumber(type) &&
-               TypeIRBuilder::IsStringPtr(value.GetType())) {
+    } else if (TypeIRBuilder::IsNumber(dst_type) && TypeIRBuilder::IsStringPtr(value.GetType())) {
         StringIRBuilder string_ir_builder(block_->getModule());
-        CHECK_STATUS(
-            string_ir_builder.CastToNumber(block_, value, type, output));
+        CHECK_STATUS(string_ir_builder.CastToNumber(block_, value, dst_type, output));
         return Status::OK();
-    } else if (TypeIRBuilder::IsNumber(type) &&
-               TypeIRBuilder::IsDatePtr(value.GetType())) {
-        *output = NativeValue::CreateNull(type);
+    } else if (src_node->IsMap() && dst_node->IsMap()) {
+        auto src_map_node = src_node->GetAsOrNull<node::MapType>();
+        assert(src_map_node != nullptr && "logic error: map type empty");
+        if (src_map_node->GetGenericType(0)->IsNull() && src_map_node->GetGenericType(1)->IsNull()) {
+            auto s = StructTypeIRBuilder::CreateStructTypeIRBuilder(block_->getModule(), dst_type);
+            CHECK_TRUE(s.ok(), kCodegenError, s.status().ToString());
+            llvm::Value* val = nullptr;
+            CHECK_TRUE(s.value()->CreateDefault(block_, &val), kCodegenError);
+            *output = NativeValue::Create(val);
+            return Status::OK();
+        } else {
+            CHECK_TRUE(false, kCodegenError, "unimplemented: casting ", src_node->DebugString(), " to ",
+                       dst_node->DebugString());
+        }
     } else {
         Status status;
         ::llvm::Value* output_value = nullptr;
-        CHECK_TRUE(UnSafeCastNumber(value.GetValue(&builder), type,
-                                    &output_value, status),
-                   kCodegenError, status.msg);
+        CHECK_TRUE(UnSafeCastNumber(value.GetValue(&builder), dst_type, &output_value, status), kCodegenError,
+                   status.msg);
         if (value.IsNullable()) {
-            *output = NativeValue::CreateWithFlag(output_value,
-                                                  value.GetIsNull(&builder));
+            *output = NativeValue::CreateWithFlag(output_value, value.GetIsNull(&builder));
         } else {
             *output = NativeValue::Create(output_value);
         }

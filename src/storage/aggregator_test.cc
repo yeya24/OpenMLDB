@@ -23,6 +23,7 @@
 #include "common/timer.h"
 #include "storage/aggregator.h"
 #include "storage/mem_table.h"
+#include "test/util.h"
 namespace openmldb {
 namespace storage {
 
@@ -84,18 +85,18 @@ bool UpdateAggr(std::shared_ptr<Aggregator> aggr, codec::RowBuilder* row_builder
         uint32_t row_size = row_builder->CalTotalLength(6 + str.size());
         encoded_row.resize(row_size);
         row_builder->SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-        row_builder->AppendString("id1", 3);
-        row_builder->AppendString("id2", 3);
-        row_builder->AppendTimestamp(static_cast<int64_t>(i) * window_size / 2);
-        row_builder->AppendInt32(i);
-        row_builder->AppendInt16(i);
-        row_builder->AppendInt64(i);
-        row_builder->AppendFloat(static_cast<float>(i));
-        row_builder->AppendDouble(static_cast<double>(i));
-        row_builder->AppendDate(i);
-        row_builder->AppendString(str.c_str(), str.size());
-        row_builder->AppendNULL();
-        row_builder->AppendInt32(i % 2);
+        (void)row_builder->AppendString("id1", 3);
+        (void)row_builder->AppendString("id2", 3);
+        (void)row_builder->AppendTimestamp(static_cast<int64_t>(i) * window_size / 2);
+        (void)row_builder->AppendInt32(i);
+        (void)row_builder->AppendInt16(i);
+        (void)row_builder->AppendInt64(i);
+        (void)row_builder->AppendFloat(static_cast<float>(i));
+        (void)row_builder->AppendDouble(static_cast<double>(i));
+        (void)row_builder->AppendDate(i);
+        (void)row_builder->AppendString(str.c_str(), str.size());
+        (void)row_builder->AppendNULL();
+        (void)row_builder->AppendInt32(i % 2);
         bool ok = aggr->Update("id1|id2", encoded_row, i);
         if (!ok) {
             return false;
@@ -122,8 +123,8 @@ bool GetUpdatedResult(const uint32_t& id, const std::string& aggr_col, const std
     std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
         aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
     replicator->Init();
-    auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, aggr_col, aggr_type,
-                                 "ts_col", bucket_size, "low_card");
+    auto aggr = CreateAggregator(base_table_meta, table, aggr_table_meta, aggr_table, replicator, 0,
+            aggr_col, aggr_type, "ts_col", bucket_size, "low_card");
     std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
         base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
     base_replicator->Init();
@@ -318,7 +319,8 @@ void CheckCountWhereAggrResult(std::shared_ptr<Table> aggr_table, std::shared_pt
 TEST_F(AggregatorTest, CreateAggregator) {
     // rows_num window type
     std::map<std::string, std::string> map;
-    std::string folder = "/tmp/" + GenRand() + "/";
+    ::openmldb::test::TempPath tmp_path;
+    std::string folder = tmp_path.GetTempPath();
     {
         uint32_t id = counter++;
         ::openmldb::api::TableMeta base_table_meta;
@@ -333,8 +335,8 @@ TEST_F(AggregatorTest, CreateAggregator) {
         std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
-        auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum",
-                                     "ts_col", "1000");
+        auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "1000");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -359,8 +361,8 @@ TEST_F(AggregatorTest, CreateAggregator) {
         std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
-        auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum",
-                                     "ts_col", "1d");
+        auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "1d");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -384,8 +386,8 @@ TEST_F(AggregatorTest, CreateAggregator) {
         std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
-        auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum",
-                                     "ts_col", "2s");
+        auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "2s");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -409,8 +411,8 @@ TEST_F(AggregatorTest, CreateAggregator) {
         std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
-        auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum",
-                                     "ts_col", "3m");
+        auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "3m");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -434,8 +436,8 @@ TEST_F(AggregatorTest, CreateAggregator) {
         std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
-        auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum",
-                                     "ts_col", "100h");
+        auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "100h");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -470,7 +472,8 @@ TEST_F(AggregatorTest, SumAggregatorUpdate) {
             aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
         replicator->Init();
         auto aggr =
-            CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum", "ts_col", "2");
+            CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                    "col3", "sum", "ts_col", "2");
         std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
             base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
         base_replicator->Init();
@@ -721,8 +724,9 @@ TEST_F(AggregatorTest, CountWhereAggregatorUpdate) {
 }
 
 TEST_F(AggregatorTest, OutOfOrder) {
+    ::openmldb::test::TempPath tmp_path;
+    std::string folder = tmp_path.GetTempPath();
     std::map<std::string, std::string> map;
-    std::string folder = "/tmp/" + GenRand() + "/";
     uint32_t id = counter++;
     ::openmldb::api::TableMeta base_table_meta;
     base_table_meta.set_tid(id);
@@ -737,7 +741,8 @@ TEST_F(AggregatorTest, OutOfOrder) {
         aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
     replicator->Init();
     auto aggr =
-        CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "sum", "ts_col", "1s");
+        CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+                "col3", "sum", "ts_col", "1s");
     std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
         base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
     base_replicator->Init();
@@ -751,21 +756,21 @@ TEST_F(AggregatorTest, OutOfOrder) {
     ASSERT_EQ(aggr_table->GetRecordCnt(), 50);
     // out of order update
     row_builder.SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-    row_builder.AppendString("id1", 3);
-    row_builder.AppendString("id2", 3);
-    row_builder.AppendTimestamp(static_cast<int64_t>(25) * 1000);
-    row_builder.AppendInt32(100);
-    row_builder.AppendInt16(100);
-    row_builder.AppendInt64(100);
-    row_builder.AppendFloat(static_cast<float>(4));
-    row_builder.AppendDouble(static_cast<double>(5));
-    row_builder.AppendDate(100);
-    row_builder.AppendString("abc", 3);
-    row_builder.AppendNULL();
+    (void)row_builder.AppendString("id1", 3);
+    (void)row_builder.AppendString("id2", 3);
+    (void)row_builder.AppendTimestamp(static_cast<int64_t>(25) * 1000);
+    (void)row_builder.AppendInt32(100);
+    (void)row_builder.AppendInt16(100);
+    (void)row_builder.AppendInt64(100);
+    (void)row_builder.AppendFloat(static_cast<float>(4));
+    (void)row_builder.AppendDouble(static_cast<double>(5));
+    (void)row_builder.AppendDate(100);
+    (void)row_builder.AppendString("abc", 3);
+    (void)row_builder.AppendNULL();
     bool ok = aggr->Update(key, encoded_row, 101);
     ASSERT_TRUE(ok);
     ASSERT_EQ(aggr_table->GetRecordCnt(), 51);
-    auto it = aggr_table->NewTraverseIterator(0);
+    std::unique_ptr<TraverseIterator> it(aggr_table->NewTraverseIterator(0));
     it->Seek(key, 25 * 1000 + 100);
     ASSERT_TRUE(it->Valid());
 
@@ -773,7 +778,7 @@ TEST_F(AggregatorTest, OutOfOrder) {
     auto val = it->GetValue();
     std::string origin_data = val.ToString();
     codec::RowView origin_row_view(aggr_table_meta.column_desc(),
-                                   reinterpret_cast<int8_t*>(const_cast<char*>(origin_data.c_str())),
+                                   reinterpret_cast<const int8_t*>(origin_data.data()),
                                    origin_data.size());
     int32_t origin_cnt = 0;
     char* ch = NULL;
@@ -806,7 +811,8 @@ TEST_F(AggregatorTest, OutOfOrder) {
 
 TEST_F(AggregatorTest, OutOfOrderCountWhere) {
     std::map<std::string, std::string> map;
-    std::string folder = "/tmp/" + GenRand() + "/";
+    ::openmldb::test::TempPath tmp_path;
+    std::string folder = tmp_path.GetTempPath();
     uint32_t id = counter++;
     ::openmldb::api::TableMeta base_table_meta;
     base_table_meta.set_tid(id);
@@ -820,8 +826,8 @@ TEST_F(AggregatorTest, OutOfOrderCountWhere) {
     std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
         aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
     replicator->Init();
-    auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "count_where",
-                                 "ts_col", "1s", "low_card");
+    auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+            "col3", "count_where", "ts_col", "1s", "low_card");
     std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
         base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
     base_replicator->Init();
@@ -835,18 +841,18 @@ TEST_F(AggregatorTest, OutOfOrderCountWhere) {
     std::string key = "id1|id2";
     // out of order update
     row_builder.SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-    row_builder.AppendString("id1", 3);
-    row_builder.AppendString("id2", 3);
-    row_builder.AppendTimestamp(static_cast<int64_t>(25) * 1000);
-    row_builder.AppendInt32(100);
-    row_builder.AppendInt16(100);
-    row_builder.AppendInt64(100);
-    row_builder.AppendFloat(static_cast<float>(4));
-    row_builder.AppendDouble(static_cast<double>(5));
-    row_builder.AppendDate(100);
-    row_builder.AppendString("abc", 3);
-    row_builder.AppendNULL();
-    row_builder.AppendInt32(0);
+    (void)row_builder.AppendString("id1", 3);
+    (void)row_builder.AppendString("id2", 3);
+    (void)row_builder.AppendTimestamp(static_cast<int64_t>(25) * 1000);
+    (void)row_builder.AppendInt32(100);
+    (void)row_builder.AppendInt16(100);
+    (void)row_builder.AppendInt64(100);
+    (void)row_builder.AppendFloat(static_cast<float>(4));
+    (void)row_builder.AppendDouble(static_cast<double>(5));
+    (void)row_builder.AppendDate(100);
+    (void)row_builder.AppendString("abc", 3);
+    (void)row_builder.AppendNULL();
+    (void)row_builder.AppendInt32(0);
     bool ok = aggr->Update(key, encoded_row, 101);
     ASSERT_TRUE(ok);
     ASSERT_EQ(aggr_table->GetRecordCnt(), 100);
@@ -912,7 +918,8 @@ TEST_F(AggregatorTest, OutOfOrderCountWhere) {
 
 TEST_F(AggregatorTest, AlignedCountWhere) {
     std::map<std::string, std::string> map;
-    std::string folder = "/tmp/" + GenRand() + "/";
+    ::openmldb::test::TempPath tmp_path;
+    std::string folder = tmp_path.GetTempPath();
     uint32_t id = counter++;
     ::openmldb::api::TableMeta base_table_meta;
     base_table_meta.set_tid(id);
@@ -926,8 +933,8 @@ TEST_F(AggregatorTest, AlignedCountWhere) {
     std::shared_ptr<LogReplicator> replicator = std::make_shared<LogReplicator>(
         aggr_table->GetId(), aggr_table->GetPid(), folder, map, ::openmldb::replica::kLeaderNode);
     replicator->Init();
-    auto aggr = CreateAggregator(base_table_meta, aggr_table_meta, aggr_table, replicator, 0, "col3", "count_where",
-                                 "ts_col", "1s", "low_card");
+    auto aggr = CreateAggregator(base_table_meta, nullptr, aggr_table_meta, aggr_table, replicator, 0,
+            "col3", "count_where", "ts_col", "1s", "low_card");
     std::shared_ptr<LogReplicator> base_replicator = std::make_shared<LogReplicator>(
         base_table_meta.tid(), base_table_meta.pid(), folder, map, ::openmldb::replica::kLeaderNode);
     base_replicator->Init();
@@ -944,18 +951,18 @@ TEST_F(AggregatorTest, AlignedCountWhere) {
     {
         int64_t cur_ts = 200;
         row_builder.SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-        row_builder.AppendString("id1", 3);
-        row_builder.AppendString("id2", 3);
-        row_builder.AppendTimestamp(cur_ts * 1000 + 500);
-        row_builder.AppendInt32(cur_ts);
-        row_builder.AppendInt16(cur_ts);
-        row_builder.AppendInt64(cur_ts);
-        row_builder.AppendFloat(static_cast<float>(cur_ts));
-        row_builder.AppendDouble(static_cast<double>(cur_ts));
-        row_builder.AppendDate(cur_ts);
-        row_builder.AppendString("abc", 3);
-        row_builder.AppendNULL();
-        row_builder.AppendInt32(0);
+        (void)row_builder.AppendString("id1", 3);
+        (void)row_builder.AppendString("id2", 3);
+        (void)row_builder.AppendTimestamp(cur_ts * 1000 + 500);
+        (void)row_builder.AppendInt32(cur_ts);
+        (void)row_builder.AppendInt16(cur_ts);
+        (void)row_builder.AppendInt64(cur_ts);
+        (void)row_builder.AppendFloat(static_cast<float>(cur_ts));
+        (void)row_builder.AppendDouble(static_cast<double>(cur_ts));
+        (void)row_builder.AppendDate(cur_ts);
+        (void)row_builder.AppendString("abc", 3);
+        (void)row_builder.AppendNULL();
+        (void)row_builder.AppendInt32(0);
         bool ok = aggr->Update(key, encoded_row, 101);
         ASSERT_TRUE(ok);
         ASSERT_EQ(aggr_table->GetRecordCnt(), 100);
@@ -1008,19 +1015,19 @@ TEST_F(AggregatorTest, AlignedCountWhere) {
     {
         int cur_ts = 40;
         row_builder.SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-        row_builder.AppendString("id1", 3);
-        row_builder.AppendString("id2", 3);
-        row_builder.AppendTimestamp(cur_ts * 1000 + 500);
-        row_builder.AppendInt32(cur_ts);
-        row_builder.AppendInt16(cur_ts);
-        row_builder.AppendInt64(cur_ts);
-        row_builder.AppendFloat(static_cast<float>(cur_ts));
-        row_builder.AppendDouble(static_cast<double>(cur_ts));
-        row_builder.AppendDate(cur_ts);
-        row_builder.AppendString("abc", 3);
-        row_builder.AppendNULL();
+        (void)row_builder.AppendString("id1", 3);
+        (void)row_builder.AppendString("id2", 3);
+        (void)row_builder.AppendTimestamp(cur_ts * 1000 + 500);
+        (void)row_builder.AppendInt32(cur_ts);
+        (void)row_builder.AppendInt16(cur_ts);
+        (void)row_builder.AppendInt64(cur_ts);
+        (void)row_builder.AppendFloat(static_cast<float>(cur_ts));
+        (void)row_builder.AppendDouble(static_cast<double>(cur_ts));
+        (void)row_builder.AppendDate(cur_ts);
+        (void)row_builder.AppendString("abc", 3);
+        (void)row_builder.AppendNULL();
         // filter key 2 not exists previously
-        row_builder.AppendInt32(2);
+        (void)row_builder.AppendInt32(2);
         bool ok = aggr->Update(key, encoded_row, 101);
         ASSERT_TRUE(ok);
         ASSERT_EQ(aggr_table->GetRecordCnt(), 100);
@@ -1067,19 +1074,19 @@ TEST_F(AggregatorTest, AlignedCountWhere) {
     {
         int cur_ts = 25;
         row_builder.SetBuffer(reinterpret_cast<int8_t*>(&(encoded_row[0])), row_size);
-        row_builder.AppendString("id1", 3);
-        row_builder.AppendString("id2", 3);
-        row_builder.AppendTimestamp(cur_ts * 1000 + 500);
-        row_builder.AppendInt32(cur_ts);
-        row_builder.AppendInt16(cur_ts);
-        row_builder.AppendInt64(cur_ts);
-        row_builder.AppendFloat(static_cast<float>(cur_ts));
-        row_builder.AppendDouble(static_cast<double>(cur_ts));
-        row_builder.AppendDate(cur_ts);
-        row_builder.AppendString("abc", 3);
-        row_builder.AppendNULL();
+        (void)row_builder.AppendString("id1", 3);
+        (void)row_builder.AppendString("id2", 3);
+        (void)row_builder.AppendTimestamp(cur_ts * 1000 + 500);
+        (void)row_builder.AppendInt32(cur_ts);
+        (void)row_builder.AppendInt16(cur_ts);
+        (void)row_builder.AppendInt64(cur_ts);
+        (void)row_builder.AppendFloat(static_cast<float>(cur_ts));
+        (void)row_builder.AppendDouble(static_cast<double>(cur_ts));
+        (void)row_builder.AppendDate(cur_ts);
+        (void)row_builder.AppendString("abc", 3);
+        (void)row_builder.AppendNULL();
         // filter key is null
-        row_builder.AppendNULL();
+        (void)row_builder.AppendNULL();
         bool ok = aggr->Update(key, encoded_row, 101);
         ASSERT_TRUE(ok);
         ASSERT_EQ(aggr_table->GetRecordCnt(), 100);
@@ -1138,5 +1145,6 @@ TEST_F(AggregatorTest, FlushAll) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    ::openmldb::test::InitRandomDiskFlags("aggregator_test");
     return RUN_ALL_TESTS();
 }

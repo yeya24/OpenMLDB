@@ -17,13 +17,9 @@
 #ifndef HYBRIDSE_SRC_CODEGEN_UDF_IR_BUILDER_H_
 #define HYBRIDSE_SRC_CODEGEN_UDF_IR_BUILDER_H_
 
-#include <map>
-#include <string>
 #include <vector>
 #include "base/fe_status.h"
 #include "codegen/expr_ir_builder.h"
-#include "codegen/scope_var.h"
-#include "llvm/IR/Module.h"
 
 #include "node/sql_node.h"
 namespace hybridse {
@@ -65,6 +61,11 @@ class UdfIRBuilder {
     Status BuildUdafCall(const node::UdafDefNode* fn,
                          const std::vector<NativeValue>& args,
                          NativeValue* output);
+
+    Status BuildVariadicUdfCall(const node::VariadicUdfDefNode* fn,
+                                const std::vector<const node::TypeNode*>& arg_types,
+                                const std::vector<NativeValue>& args,
+                                NativeValue* output);
 
     Status GetUdfCallee(const node::UdfDefNode* fn,
                         ::llvm::FunctionCallee* callee, bool* return_by_arg);

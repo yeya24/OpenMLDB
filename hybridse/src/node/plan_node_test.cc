@@ -35,15 +35,9 @@ TEST_F(PlanNodeTest, PlanNodeEqualsTest) {
     PlanNode *table1 = manager_->MakeTablePlanNode("db1", "t1");
     PlanNode *table2 = manager_->MakeTablePlanNode("db1", "t1");
     PlanNode *table3 = manager_->MakeTablePlanNode("db2", "t2");
-    PlanNode *primary_table1 = manager_->MakeTablePlanNode("db1", "t1");
-    PlanNode *primary_table2 = manager_->MakeTablePlanNode("db1", "t1");
-    dynamic_cast<TablePlanNode*>(primary_table1)->SetIsPrimary(true);
-    dynamic_cast<TablePlanNode*>(primary_table2)->SetIsPrimary(true);
     ASSERT_TRUE(table1->Equals(table1));
     ASSERT_TRUE(table1->Equals(table2));
     ASSERT_FALSE(table1->Equals(table3));
-    ASSERT_FALSE(table1->Equals(primary_table1));
-    ASSERT_TRUE(primary_table1->Equals(primary_table2));
 
     PlanNode *rename1 = manager_->MakeRenamePlanNode(table1, "table1");
     PlanNode *rename2 = manager_->MakeRenamePlanNode(table2, "table1");
@@ -234,18 +228,20 @@ TEST_F(PlanNodeTest, MultiPlanNodeTest) {
 
 TEST_F(PlanNodeTest, ExtractColumnsAndIndexsTest) {
     SqlNodeList *index_items = manager_->MakeNodeList();
-    index_items->PushBack(manager_->MakeIndexKeyNode("col4"));
+    index_items->PushBack(manager_->MakeIndexKeyNode("col4", "key"));
     index_items->PushBack(manager_->MakeIndexTsNode("col5"));
     ColumnIndexNode *index_node = dynamic_cast<ColumnIndexNode *>(manager_->MakeColumnIndexNode(index_items));
     index_node->SetName("index1");
     CreatePlanNode *node = manager_->MakeCreateTablePlanNode(
         "", "t1",
-        {manager_->MakeColumnDescNode("col1", node::kInt32, true),
-         manager_->MakeColumnDescNode("col2", node::kInt32, true),
-         manager_->MakeColumnDescNode("col3", node::kFloat, true),
-         manager_->MakeColumnDescNode("col4", node::kVarchar, true),
-         manager_->MakeColumnDescNode("col5", node::kTimestamp, true), index_node},
-        {manager_->MakeReplicaNumNode(3), manager_->MakePartitionNumNode(8), manager_->MakeStorageModeNode(kMemory)},
+        {manager_->MakeNode<node::ColumnDefNode>("col1", manager_->MakeNode<ColumnSchemaNode>(node::kInt32, true)),
+         manager_->MakeNode<node::ColumnDefNode>("col2", manager_->MakeNode<ColumnSchemaNode>(node::kInt32, true)),
+         manager_->MakeNode<node::ColumnDefNode>("col3", manager_->MakeNode<ColumnSchemaNode>(node::kFloat, true)),
+         manager_->MakeNode<node::ColumnDefNode>("col4", manager_->MakeNode<ColumnSchemaNode>(node::kVarchar, true)),
+         manager_->MakeNode<node::ColumnDefNode>("col5", manager_->MakeNode<ColumnSchemaNode>(node::kTimestamp, true)),
+         index_node},
+        {manager_->MakeReplicaNumNode(3), manager_->MakePartitionNumNode(8),
+         manager_->MakeNode<StorageModeNode>(kMemory)},
         false);
     ASSERT_TRUE(nullptr != node);
     std::vector<std::string> columns;

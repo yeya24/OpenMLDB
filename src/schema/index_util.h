@@ -19,6 +19,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 #include "base/status.h"
 #include "proto/common.pb.h"
 #include "proto/name_server.pb.h"
@@ -35,21 +36,45 @@ class IndexUtil {
     static base::Status CheckIndex(const std::map<std::string, ::openmldb::common::ColumnDesc>& column_map,
             const PBIndex& index);
 
-    static base::Status CheckNewIndex(const ::openmldb::common::ColumnKey& column_key,
-            const openmldb::nameserver::TableInfo& table_info);
+    static bool IsExist(const ::openmldb::common::ColumnKey& column_key, const PBIndex& index);
 
-    static bool CheckExist(const ::openmldb::common::ColumnKey& column_key,
-            const PBIndex& index, int32_t* pos);
+    static int GetPosition(const ::openmldb::common::ColumnKey& column_key, const PBIndex& index);
+
+    static std::vector<::openmldb::common::ColumnKey> Convert2Vector(const PBIndex& index);
+
+    static PBIndex Convert2PB(const std::vector<::openmldb::common::ColumnKey>& index);
 
     static base::Status CheckUnique(const PBIndex& index);
 
-    static bool CheckTTL(const ::openmldb::common::TTLSt& ttl);
+    static base::Status CheckTTL(const ::openmldb::common::TTLSt& ttl);
 
     static bool AddDefaultIndex(openmldb::nameserver::TableInfo* table_info);
 
     static bool FillColumnKey(openmldb::nameserver::TableInfo* table_info);
 
     static std::string GetIDStr(const ::openmldb::common::ColumnKey& column_key);
+};
+
+class TableIndexInfo {
+ public:
+    TableIndexInfo(const ::openmldb::api::TableMeta& table_meta,
+             const std::vector<::openmldb::common::ColumnKey>& add_indexs)
+        : table_meta_(table_meta), add_indexs_(add_indexs) {}
+    bool Init();
+    const std::vector<uint32_t>& GetAllIndexCols() const { return all_index_cols_; }
+    const std::vector<uint32_t>& GetAddIndexIdx() const { return add_index_idx_vec_; }
+    bool HasIndex(uint32_t idx) const;
+    const std::vector<uint32_t>& GetIndexCols(uint32_t idx);
+    const std::vector<uint32_t>& GetRealIndexCols(uint32_t idx);  // the pos in all_index_cols_
+
+ private:
+    ::openmldb::api::TableMeta table_meta_;
+    std::vector<::openmldb::common::ColumnKey> add_indexs_;
+    std::map<std::string, uint32_t> column_idx_map_;
+    std::vector<uint32_t> all_index_cols_;
+    std::vector<uint32_t> add_index_idx_vec_;
+    std::map<uint32_t, std::vector<uint32_t>> index_cols_map_;
+    std::map<uint32_t, std::vector<uint32_t>> real_index_cols_map_;
 };
 
 }  // namespace schema

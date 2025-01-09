@@ -17,15 +17,16 @@
 #ifndef HYBRIDSE_SRC_UDF_UDF_H_
 #define HYBRIDSE_SRC_UDF_UDF_H_
 #include <stdint.h>
+
 #include <string>
 #include <tuple>
+#include <utility>
+
+#include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "base/string_ref.h"
 #include "base/type.h"
-#include "boost/lexical_cast.hpp"
-#include "codec/list_iterator_codec.h"
-#include "codec/type_codec.h"
-#include "node/node_manager.h"
-#include "proto/fe_type.pb.h"
+#include "udf/literal_traits.h"
 #include "udf/openmldb_udf.h"
 
 namespace hybridse {
@@ -33,8 +34,102 @@ namespace udf {
 using openmldb::base::StringRef;
 using openmldb::base::Date;
 using openmldb::base::Timestamp;
+using openmldb::base::UDFContext;
 
 namespace v1 {
+
+// ============================================= //
+//       Object Lieftime Management
+//           Helper Classes
+// ============================================= //
+
+// a meta class stores all allocation info of a 'Arrayref<T>' instance
+//
+// In UDF system e.g when a external udf function has a `ArrayRef<T>*` as last parameter
+// for return info, the `ArrayRef<T>*` object require allocation before use, which are
+// `ArrayRef<T>::raw` and `ArrayRef<T>::nullables` as two arrays.
+//
+// The two arrays' lifetime will managed by JitRuntime:
+// - Allocate outside with new/malloc operation
+// - Register with `RegisterManagedObj`
+// - Free in `JitRuntime::ReleaseRunStep`
+template <typename T, typename CType = typename DataTypeTrait<T>::CCallArgType>
+struct ArrayMeta : public base::FeBaseObject {
+    ArrayMeta(CType *r, bool *nullable) : base::FeBaseObject(), raw(r), nullables(nullable) {}
+    ~ArrayMeta() override {
+        delete[] raw;
+        delete[] nullables;
+    }
+
+    CType *raw;
+    bool *nullables;
+};
+
+// OpaqueMeta
+// Mange allocated container through Jit runtime only for T is pointer.
+// This is useful when allocated a `ArrayRef<T>` parameter from a external udf call
+template <typename T, std::enable_if_t<std::is_pointer_v<T>, int> = 0>
+struct OpaqueMeta : public base::FeBaseObject {
+    explicit OpaqueMeta(T i) : inst(i) {}
+    ~OpaqueMeta() override {
+        delete inst;
+    }
+
+    T inst;
+};
+
+// ============================================= //
+//       Object Lieftime Management
+//              Interface
+// ============================================= //
+
+// register the obj to jit runtime
+void RegisterManagedObj(base::FeBaseObject* obj);
+
+/**
+ * Allocate string buffer from jit runtime.
+ */
+char *AllocManagedStringBuf(int32_t bytes);
+
+// alloc necessary space for ArrayRef and let Jit runtime manage its lifetime
+//
+// type T should be of UDF type systems: bool/intxx/float/double/StringRef/TimeStamp/Date
+template <typename T>
+void AllocManagedArray(ArrayRef<T>* arr, uint64_t sz) {
+    assert(arr != nullptr);
+
+    if (sz == 0) {
+        return;
+    }
+
+    using CType = typename std::remove_pointer_t<decltype(ArrayRef<T>::raw)>;
+
+    CType* raw = new CType[sz];
+
+    // alloc space for array elements if they are pointers
+    if constexpr (std::is_pointer_v<CType>) {
+        for (size_t i = 0; i < sz; ++i) {
+            CType inst = CCallDataTypeTrait<CType>::alloc_instance();
+
+            RegisterManagedObj(new OpaqueMeta<CType>(inst));
+
+            raw[i] = inst;
+        }
+    }
+
+    auto nulls = new bool[sz];
+
+    RegisterManagedObj(new ArrayMeta<T>(raw, nulls));
+
+    arr->raw = raw;
+    arr->nullables = nulls;
+    arr->size = sz;
+}
+
+
+// ============================================= //
+//       External UDF defines
+// ============================================= //
 
 template <class V>
 struct Abs {
@@ -122,16 +217,21 @@ struct Pow {
 
 template <class V>
 struct Round {
-    using Args = std::tuple<V>;
+    using Args = std::tuple<V, int32_t>;
 
-    V operator()(V r) { return static_cast<V>(round(r)); }
-};
-
-template <class V>
-struct Round32 {
-    using Args = std::tuple<V>;
-
-    int32_t operator()(V r) { return static_cast<int32_t>(round(r)); }
+    V operator()(V val, int32_t decimal_number) {
+        if constexpr (std::is_integral_v<V>) {
+            if (decimal_number >= 0) {
+                return val;
+            } else {
+                double factor = std::pow(10, -decimal_number);
+                return static_cast<V>(std::round(val / factor) * factor);
+            }
+        } else {
+            // floats
+            return static_cast<V>(std::round(val * std::pow(10, decimal_number)) / std::pow(10, decimal_number));
+        }
+    }
 };
 
 template <class V>
@@ -203,6 +303,18 @@ struct IncOne {
     V operator()(V i) { return i + 1; }
 };
 
+int64_t FarmFingerprint(absl::string_view input);
+template <typename T>
+struct Hash64 {
+    using Args = std::tuple<T>;
+
+    using ParamType = typename DataTypeTrait<T>::CCallArgType;
+
+    int64_t operator()(ParamType v) {
+        return FarmFingerprint(CCallDataTypeTrait<ParamType>::to_bytes_ref(&v));
+    }
+};
+
 int32_t month(int64_t ts);
 int32_t month(Timestamp *ts);
 
@@ -230,7 +342,6 @@ void last_day(const Date *ts, Date *output, bool *is_null);
 
 void int_to_char(int32_t, StringRef*);
 int32_t char_length(StringRef *str);
-double degree_to_radius(double degree);
 
 float Cotf(float x);
 double Degrees(double x);
@@ -252,6 +363,11 @@ void timestamp_to_date(Timestamp *timestamp, Date *output, bool *is_null);
 
 void date_to_string(Date *date, StringRef *output);
 
+void date_diff(Date *date1, Date *date2, int32_t *diff, bool *is_null);
+void date_diff(StringRef *date1, StringRef *date2, int32_t *diff, bool *is_null);
+void date_diff(StringRef *date1, Date *date2, int32_t *diff, bool *is_null);
+void date_diff(Date *date1, StringRef *date2, int32_t *diff, bool *is_null);
+
 void like(StringRef *name, StringRef *pattern,
         StringRef *escape, bool *out, bool *is_null);
 void like(StringRef *name, StringRef *pattern, bool *out, bool *is_null);
@@ -259,15 +375,83 @@ void ilike(StringRef *name, StringRef *pattern,
         StringRef *escape, bool *out, bool *is_null);
 void ilike(StringRef *name, StringRef *pattern, bool *out, bool *is_null);
 
+void regexp_like(StringRef *name, StringRef *pattern, StringRef *flags, bool *out, bool *is_null);
+void regexp_like(StringRef *name, StringRef *pattern, bool *out, bool *is_null);
+
 void date_to_timestamp(Date *date, Timestamp *output, bool *is_null);
 void string_to_date(StringRef *str, Date *output, bool *is_null);
+absl::StatusOr<absl::Time> string_to_time(absl::string_view str);
+
 void string_to_timestamp(StringRef *str, Timestamp *output, bool *is_null);
+void date_to_unix_timestamp(Date *date, int64_t *output, bool *is_null);
+void string_to_unix_timestamp(StringRef *str, int64_t *output, bool *is_null);
+int64_t unix_timestamp();
 void sub_string(StringRef *str, int32_t pos,
                 StringRef *output);
 void sub_string(StringRef *str, int32_t pos, int32_t len,
                 StringRef *output);
+int32_t locate(StringRef *substr, StringRef* str);
+int32_t locate(StringRef *substr, StringRef* str, int32_t pos);
 int32_t strcmp(StringRef *s1, StringRef *s2);
 void bool_to_string(bool v, StringRef *output);
+
+// transform string into integral
+// base is default to 10, 16 if string starts with '0x' or '0X', other base is not considered.
+// for hex string, it's parsed unsigned, add minus('-') to the very begining for negative hex
+// returns (status, int64)
+struct StrToIntegral {
+    std::pair<absl::Status, int64_t> operator()(absl::string_view in) {
+        in = absl::StripAsciiWhitespace(in);
+        if (0 == in.size()) {
+            return {absl::InvalidArgumentError("empty or blank string"), {}};
+        }
+
+        // reset errno to 0 before call
+        errno = 0;
+
+        int base = 10;
+        auto copy = in;
+        if (copy[0] == '+' || copy[0] == '-') {
+            copy.remove_prefix(1);
+        }
+        copy = copy.substr(0, 2);
+        if (copy == "0x" || copy == "0X") {
+            base = 16;
+        }
+
+        std::string copy_of_str(in);
+        const char *str = copy_of_str.data();
+        char *endptr = NULL;
+        // always to int64
+        int64_t number = std::strtoll(str, &endptr, base);
+
+        if (str == endptr) {
+            //  invalid: no digits found
+            return {absl::InvalidArgumentError(absl::StrCat(in, " (no digitals found)")), {}};
+        } else if (errno == ERANGE && number == LLONG_MIN) {
+            return {absl::OutOfRangeError(absl::StrCat(in, " (underflow)")), number};
+        } else if (errno == ERANGE && number == LLONG_MAX) {
+            return {absl::OutOfRangeError(absl::StrCat(in, " (overflow)")), number};
+        } else if (errno == EINVAL) {
+            // not copy_of_str all c99 implementations - gcc OK
+            return {absl::InvalidArgumentError(absl::StrCat(in, " (base contains unsupported value)")), {}};
+        } else if (errno != 0 && number == 0) {
+            // invalid:  unspecified error occurred
+            return {absl::UnknownError(absl::StrCat(in, " (unspecified error: ", std::strerror(errno), ")")), {}};
+        } else if (errno == 0 && str) {
+            if (*endptr != 0) {
+                return {
+                    absl::InvalidArgumentError(absl::StrCat(in, " (digitals with extra non-space chars following)")),
+                    {}};
+            }
+            // valid  (and represents all characters read;
+            return {absl::OkStatus(), number};
+        }
+
+        return {absl::UnknownError(absl::StrCat(in, " (unspecified error)")), {}};
+    }
+};
+
 void string_to_bool(StringRef *str, bool *out, bool *is_null_ptr);
 void string_to_int(StringRef *str, int32_t *v, bool *is_null_ptr);
 void string_to_smallint(StringRef *str, int16_t *v, bool *is_null_ptr);
@@ -293,10 +477,6 @@ void replace(StringRef *str, StringRef *search, StringRef *output, bool *is_null
 
 void init_udfcontext(UDFContext* context);
 void trivial_fun();
-/**
- * Allocate string buffer from jit runtime.
- */
-char *AllocManagedStringBuf(int32_t bytes);
 
 template <class V>
 struct ToString {
@@ -339,6 +519,11 @@ struct ToHex {
 };
 void hex(StringRef *str, StringRef *output);
 
+void unhex(StringRef *str, StringRef *output, bool* is_null);
+
+void printLog(const char* fmt);
+void array_combine(codec::StringRef *del, int32_t cnt, ArrayRef<codec::StringRef> **data,
+                   ArrayRef<codec::StringRef> *out);
 }  // namespace v1
 
 /// \brief register native udf related methods into given UdfLibrary `lib`

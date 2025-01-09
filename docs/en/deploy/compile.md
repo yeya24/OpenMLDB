@@ -1,31 +1,29 @@
-# Build
+# Compilation from Source Code
 
-## 1. Quick Start
+## Compile and Use in Docker Container
 
-[quick-start]: quick-start
+This section describes the steps to compile and use OpenMLDB inside its official docker image [hybridsql](https://hub.docker.com/r/4pdosc/hybridsql), mainly for quick start and development purposes in the docker container.
+The docker image has packed the required tools and dependencies, so there is no need to set them up separately. To compile without the official docker image, refer to the section [Detailed Instructions for Build](#detailed-instructions-for-build) below.
 
-This section describes the steps to compile and use OpenMLDB inside its official docker image [hybridsql](https://hub.docker.com/r/4pdosc/hybridsql).
-The docker image has packed required tools and dependencies, so there is no need to set them up separately. To compile without the official docker image, refer to the section [Detailed Instructions for Build](#detailed-instructions-for-build) below.
-
-Keep in mind that you should always use the same version of both compile image and [OpenMLDB version](https://github.com/4paradigm/OpenMLDB/releases). This section demonstrates compiling for [OpenMLDB v0.5.0](https://github.com/4paradigm/OpenMLDB/releases/tag/v0.5.0) under `hybridsql:0.5.0` ，If you prefer to compile on the latest code in `main` branch, pull `hybridsql:latest` image instead.
+Keep in mind that you should always use the same version of both compile image and [OpenMLDB version](https://github.com/4paradigm/OpenMLDB/releases). This section demonstrates compiling for [OpenMLDB v0.9.2](https://github.com/4paradigm/OpenMLDB/releases/tag/v0.9.2) under `hybridsql:0.9.2` ，If you prefer to compile on the latest code in `main` branch, pull `hybridsql:latest` image instead.
 
 1. Pull the docker image
 
    ```bash
-    docker pull 4pdosc/hybridsql:0.5
+    docker pull 4pdosc/hybridsql:0.9
    ```
 
-2. Create a docker container with the hybridsql docker image
+2. Create a docker container
 
    ```bash
-   docker run -it 4pdosc/hybridsql:0.5 bash
+   docker run -it 4pdosc/hybridsql:0.9 bash
    ```
 
-3. Download the OpenMLDB source code inside the docker container, and setting the branch into v0.5.0
+3. Download the OpenMLDB source code inside the docker container, and set the branch into v0.9.2
 
    ```bash
    cd ~
-   git clone -b v0.5.0 https://github.com/4paradigm/OpenMLDB.git
+   git clone -b v0.9.2 https://github.com/4paradigm/OpenMLDB.git
    ```
 
 4. Compile OpenMLDB
@@ -41,54 +39,49 @@ Keep in mind that you should always use the same version of both compile image a
    make install
    ```
 
-Now you've finished the compilation job, and you may try run OpenMLDB inside the docker container.
+Now you've finished the compilation job, you may try running OpenMLDB inside the docker container.
 
-## 2. Detailed Instructions for Build
+## Detailed Instructions for Build
 
-[build]: build
+This chapter discusses compiling source code without relying on pre-built container environments.
 
-### 2.1. Hardware Requirements
+### Hardware Requirements
 
 - **Memory**: 8GB+ recommended.
 - **Disk Space**: >=25GB of free disk space for full compilation.
-- **Operating System**: CentOS 7, Ubuntu 20.04 or macOS >= 10.15, other systems are not carefully tested but issue/PR welcome
+- **Operating System**: CentOS 7, Ubuntu 20.04 or macOS >= 12.0 (Intel Chip), other systems are not carefully tested but issue/PR welcome
+- **CPU Architecture**: x86 only, other architectures like ARM are not supported (note that running x86 container heterogeneously on machines like Mac with Apple Silicon is not supported neither).
 
-Note: By default, the parallel build is disabled, and it usually takes an hour to finish all the compile jobs. You can enable the parallel build by tweaking the `NPROC` option if your machine's resource is enough. This will reduce the compile time but also consume more memory. For example, the following command set the number of concurrent build jobs to 4:
+💡 Note: By default, the parallel build is disabled, and it usually takes an hour to finish all the compile jobs. You can enable the parallel build by tweaking the `NPROC` option if your machine's resource is enough. This will reduce the compile time but also consume more memory. For example, the following command sets the number of concurrent build jobs to 4:
 
 ```bash
 make NPROC=4
 ```
 
-### 2.2. Prerequisites
-
-Make sure those tools are installed
-
+### Dependencies
 - gcc >= 8 or AppleClang >= 12.0.0
-- cmake 3.20 or later
+- cmake 3.20 or later ( recommended < cmake 3.24)
 - jdk 8
 - python3, python setuptools, python wheel
 - If you'd like to compile thirdparty from source, checkout the [third-party's requirement](../../third-party/README.md) for extra dependencies
 
-### 2.3. Build and Install OpenMLDB
+### Build and Install OpenMLDB
 
-Building OpenMLDB requires certain thirdparty dependencies. Hence a Makefile is provided as a convenience to setup thirdparty dependencies automatically and run CMake project in a single command `make`. The `make` command offers three methods to compile, each manages thirdparty differently:
+Building OpenMLDB requires certain thirdparty dependencies. Hence a `Makefile` is provided as a convenience to setup thirdparty dependencies automatically and run CMake project in a single command `make`. The `make` command offers three methods to compile, each manages thirdparty differently:
 
-- **Method One: Build and Run Inside Docker:** Using [hybridsql](https://hub.docker.com/r/4pdosc/hybridsql) docker image, the thirdparty is already bundled inside the image and no extra steps are required, refer to above section [Quick Start](#quick-start)
-- **Method Two: Download Pre-Compiled Thirdparty:** It downloads necessary prebuild libraries from [hybridsql-assert](https://github.com/4paradigm/hybridsql-asserts/releases). This is the default behavior when building outside a hybridsql container. Currently it supports CentOS 7, Ubuntu 20.04 and macOS. The default command to build and install is `make && make install`
-- **Method Three: Compile Thirdparty from Source:** This is the suggested way if the host system is not in the supported list for pre-compiled thirdparty (CentOS 7, Ubuntu 20.04 and macOS). Note that when compiling thirdparty for the first time requires extra time to finish, approximately 1 hour on a 2 core & 7 GB machine. To compile thirdparty from source, please pass `BUILD_BUNDLED=ON` to `make`:
+- **Method One: Download Pre-Compiled Thirdparty(limited OSs only):**  Command is `make && make install`. It downloads necessary pre-compiled libraries from [hybridsql-assert](https://github.com/4paradigm/hybridsql-asserts/releases) and [zetasql](https://github.com/4paradigm/zetasql/releases).  Currently it supports CentOS 7, Ubuntu 20.04 and macOS >= 12.0.
+- **Method Two: Compile Thirdparty from Source(all supported OSs):** This is the suggested way if the host system is not in the supported list for pre-compiled thirdparty (CentOS 7, Ubuntu 20.04 and macOS). Note that when compiling thirdparty for the first time requires extra time to finish, approximately 1 hour on a 2 core & 8 GB machine. To compile thirdparty from source, please pass `BUILD_BUNDLED=ON` to `make`:
   
    ```bash
    make BUILD_BUNDLED=ON
    make install
    ```
 
-All of the three methods above will install OpenMLDB binaries into `${PROJECT_ROOT}/openmldb` by default, you may tweak the installation directory with the option `CMAKE_INSTALL_PREFIX` (refer the following section [Extra options for `make`](#make-opts)).
+All of the three methods above will install OpenMLDB binaries into `${PROJECT_ROOT}/openmldb` by default, you may tweak the installation directory with the option `CMAKE_INSTALL_PREFIX` (refer to the following section [Extra Parameters for `make`](#extra-parameters-for-make) ).
 
-### 2.4. Extra Options for `make`
+### Extra Parameters for `make`
 
-[make-opts]: make-opts
-
-You can customize the `make` behavior by passing following arguments, e.g., changing the build mode to `Debug` instead of `Release`:
+You can customize the `make` behavior by passing the following arguments, e.g., changing the build mode to `Debug` instead of `Release`:
 
 ```bash
 make CMAKE_BUILD_TYPE=Debug
@@ -134,15 +127,30 @@ make CMAKE_BUILD_TYPE=Debug
 
   Default: ON
 
+- OPENMLDB_BUILD_TARGET: If you only want to build some targets, not all, e.g. only build a test `ddl_parser_test`, you can set it to `ddl_parser_test`. Multiple targets may be given, separated by spaces. It can reduce build time, reduce build output, and save storage space.
 
-## 3. Optimized Spark Distribution for OpenMLDB
+  Default: all
+
+- THIRD_PARTY_CMAKE_FLAGS: You can use this to configure additional parameters when compiling third-party dependencies. For instance, to specify concurrent compilation for each third-party project, you can set` THIRD_PARTY_CMAKE_FLAGS` to `-DMAKEOPTS=-j8`. Please note that NPROC does not affect third-party compilation; multiple third-party projects will be executed sequentially.
+  
+  Default: ''
+
+### Build Java SDK with Multi Processes
+
+```
+make SQL_JAVASDK_ENABLE=ON NPROC=4
+```
+
+The built jar packages are in the `target` path of each submodule. If you want to use the jar packages built by yourself, please DO NOT add them by systemPath(may get `ClassNotFoundException` about Protobuf and so on, requires a little work in compile and runtime phase). The better way is, use `mvn install -DskipTests=true -Dscalatest.skip=true -Dwagon.skip=true -Dmaven.test.skip=true -Dgpg.skip` to install them in local m2 repository, your project will use them.
+
+## Optimized Spark Distribution for OpenMLDB
 
 [OpenMLDB Spark Distribution](https://github.com/4paradigm/spark) is the fork of [Apache Spark](https://github.com/apache/spark). It adopts specific optimization techniques for OpenMLDB. It provides native `LastJoin` implementation and achieves 10x~100x performance improvement compared with the original Spark distribution. The Java/Scala/Python/SQL APIs of the OpenMLDB Spark distribution are fully compatible with the standard Spark distribution.
 
 1. Downloading the pre-built OpenMLDB Spark distribution:
 
 ```bash
-wget https://github.com/4paradigm/spark/releases/download/v3.0.0-openmldb0.2.3/spark-3.0.0-bin-openmldbspark.tgz
+wget https://github.com/4paradigm/spark/releases/download/v3.2.1-openmldb0.9.2/spark-3.2.1-bin-openmldbspark.tgz
 ```
 
 Alternatively, you can also download the source code and compile from scratch:
@@ -150,15 +158,95 @@ Alternatively, you can also download the source code and compile from scratch:
 ```bash
 git clone https://github.com/4paradigm/spark.git
 cd ./spark/
-./dev/make-distribution.sh --name openmldbspark --pip --tgz -Phadoop-2.7 -Pyarn -Pallinone
+./dev/make-distribution.sh --name openmldbspark --pip --tgz -Phadoop-2.7 -Pyarn -Pallinone -Phive -Phive-thriftserver
 ```
 
 2. Setting up the environment variable `SPARK_HOME` to make the OpenMLDB Spark distribution for OpenMLDB or other Spark applications
 
 ```bash
-tar xzvf ./spark-3.0.0-bin-openmldbspark.tgz
-cd spark-3.0.0-bin-openmldbspark/
+tar xzvf ./spark-3.2.1-bin-openmldbspark.tgz
+cd spark-3.2.1-bin-openmldbspark/
 export SPARK_HOME=`pwd`
 ```
 
 3. Now you are all set to run OpenMLDB by enjoying the performance speedup from this optimized Spark distribution.
+
+
+## Build for Other OS
+As previously mentioned, if you want to run OpenMLDB or the SDK on a different OS, you will need to compile from the source code. We provide quick compilation solutions for several operating systems. For other OS, you'll need to perform source code compilation on your own.
+
+### Centos 6 or other glibc Linux OS
+#### Local Compilation
+To compile a version compatible with CentOS 6, you can use Docker and the `steps/centos6_build.sh` script. As shown below, we use the current directory as the mount directory and place the compilation output locally.
+
+```bash
+git clone https://github.com/4paradigm/OpenMLDB.git
+cd OpenMLDB
+docker run -it -v`pwd`:/root/OpenMLDB ghcr.io/4paradigm/centos6_gcc7_hybridsql bash
+```
+Execute the compilation script within the container, and the output will be in the "build" directory. If there are failures while downloading `bazel` or `icu4c` during compilation, you can use the image sources provided by OpenMLDB by configuring the environment variable `OPENMLDB_SOURCE=true`. Various environment variables that can be used with "make" will also work, as shown below.
+
+```bash
+cd OpenMLDB
+bash steps/centos6_build.sh
+# THIRD_PARTY_CMAKE_FLAGS=-DMAKEOPTS=-j8 bash steps/centos6_build.sh # run fast when build single project
+# OPENMLDB_SOURCE=true bash steps/centos6_build.sh
+# SQL_JAVASDK_ENABLE=ON SQL_PYSDK_ENABLE=ON NPROC=8 bash steps/centos6_build.sh # NPROC will build openmldb in parallel, thirdparty should use THIRD_PARTY_CMAKE_FLAGS
+```
+
+For a local compilation with a 2.20GHz CPU, SSD hard drive, and 32 threads to build both third-party libraries and the OpenMLDB core, the approximate timeframes are as follows:
+`THIRD_PARTY_CMAKE_FLAGS=-DMAKEOPTS=-j32 SQL_JAVASDK_ENABLE=ON SQL_PYSDK_ENABLE=ON NPROC=32 bash steps/centos6_build.sh`
+- third-party (excluding source code download time): Approximately 40 minutes:
+  - Zetasql patch: 13 minutes
+  - Compilation of all third-party dependencies: 30 minutes
+- OpenMLDB core, including Python and Java native components: Approximately 12 minutes
+
+Please note that these times can vary depending on your specific hardware and system performance. The provided compilation commands and environment variables are optimized for multi-threaded compilation, which can significantly reduce build times.
+
+#### Cloud Compilation
+
+After forking the OpenMLDB repository, you can trigger the `Other OS Build` workflow in `Actions`, and the output will be available in the `Actions` `Artifacts`. Here's how to configure the workflow:
+
+- Do not change the `Use workflow from` setting to a specific tag; it can be another branch.
+- Choose the desired `OS name`, which in this case is `centos6`.
+- If you are not compiling the main branch, provide the name of the branch, tag (e.g., v0.9.2), or SHA you want to compile in the `The branch, tag, or SHA to checkout, otherwise use the branch` field.
+- The compilation output will be accessible in "runs", as shown in an example [here](https://github.com/4paradigm/OpenMLDB/actions/runs/6044951902).
+  - The workflow will definitely produce the OpenMLDB binary file.
+  - If you don't need the Java or Python SDK, you can configure `java sdk enable` or `python sdk enable` to be "OFF" to save compilation time.
+
+Please note that this compilation process involves building third-party dependencies from source code, and it may take a while to complete due to limited resources. The approximate time for this process is around 3 hours and 5 minutes (2 hours for third-party dependencies and 1 hour for OpenMLDB). However, the workflow caches the compilation output for third-party dependencies, so the second compilation will be much faster, taking approximately 1 hour and 15 minutes for OpenMLDB.
+
+### Linux for ARM64
+
+It's possible to run OpenMLDB on Linux for ARM64(AArch64), which you may compile the source from scratch. ARM version of compile image `ghcr.io/4paradigm/hybridsql` is recommended:
+
+```sh
+docker run -it ghcr.io/4paradigm/hybridsql:latest
+ 
+# inside docker container
+git clone https://github.com/4paradigm/OpenMLDB
+cd OpenMLDB
+ 
+#  necessary deps for all third-party
+yum install -y flex autoconf automake unzip bc expect libtool \
+    rh-python38-python-devel gettext byacc xz tcl cppunit-devel rh-python38-python-wheel patch java-1.8.0-openjdk-devel
+# bazel
+curl --create-dirs -SLo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-arm64
+chmod +x /usr/local/bin/bazel
+ 
+# third-party
+cmake -S third-party -B .deps -DBUILD_BUNDELD=ON -DMAKEOPTS=-j$(nproc)
+cmake --build .deps
+ 
+# OpenMLDB source
+cmake -S . -B build -DCMKAE_PREFIX_PATH=$(pwd)/.deps/usr -DSQL_JAVASDK_ENABLE=ON -DSQL_PYSDK_ENABLE=ON
+cmake --build build -- -j$(nproc)
+```
+
+
+### Macos 10.15, 11
+
+MacOS doesn't require compiling third-party dependencies from source code, so compilation is relatively faster, taking about 1 hour and 15 minutes. Local compilation is similar to the steps outlined in the [Detailed Instructions for Build](#detailed-instructions-for-build) and does not require compiling third-party dependencies (`BUILD_BUNDLED=OFF`). For cloud compilation on macOS, trigger the `Other OS Build` workflow in `Actions` with the specified macOS version (`os name` as `macos10` or `macos11`). You can also disable Java or Python SDK compilation if they are not needed, by setting `java sdk enable` or `python sdk enable` to `OFF`.
+
+
+

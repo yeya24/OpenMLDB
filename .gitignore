@@ -64,10 +64,7 @@ src/version.h
 src/config.h
 java/openmldb-native/src/main/resources
 java/openmldb-native/src/main/java
-java/openmldb-common/src/main/java/com/_4paradigm/openmldb/proto/
-java/openmldb-import/src/main/java/com/_4paradigm/openmldb/proto/
-java/openmldb-nearline-tablet/src/main/java/com/_4paradigm/openmldb/proto/
-java/openmldb-taskmanager/src/main/java/com/_4paradigm/openmldb/proto/
+java/openmldb-*/src/main/java/com/_4paradigm/openmldb/proto/
 java/hybridse-native/src/main/java
 java/hybridse-proto/src
 **/.mvn/wrapper/maven-wrapper.jar
@@ -96,7 +93,9 @@ java/hybridse-proto/src
 **/scalastyle-output.xml
 
 # test
-logs
+logs/
+out/
+allure-results/
 
 # python builds
 /python/openmldb_sdk/dist/
@@ -105,5 +104,14 @@ logs
 !/python/openmldb_sdk/openmldb/native/__init__.pyt
 /python/openmldb_sdk/test/*.xml
 /python/openmldb_tool/dist/
-/python/openmldb_tool/openmldb.egg-info/
+/python/openmldb_tool/*.egg-info/
+/python/openmldb_autofe/*.egg-info/
+# go sdk
+!go.mod
 
+# tag files
+**/tags
+**/GPATH
+**/GRTAGS
+**/GTAGS
+**/cscope.out

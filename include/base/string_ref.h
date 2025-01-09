@@ -18,6 +18,7 @@
 #define INCLUDE_BASE_STRING_REF_H_
 
 #include <stdint.h>
+
 #include <cstddef>
 #include <cstring>
 #include <string>
@@ -35,6 +36,11 @@ struct StringRef {
 
     StringRef(const std::string& str) // NOLINT
         : size_(str.size()), data_(str.data()) {}
+
+    StringRef(std::string&& str) = delete;  // NOLINT
+
+    template <typename Char>
+    StringRef(std::basic_string_view<Char> v) : size_(v.size()), data_(v.data()) {}  // NOLINT
 
     ~StringRef() {}
 

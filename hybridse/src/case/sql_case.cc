@@ -16,12 +16,17 @@
 
 #include "case/sql_case.h"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "absl/strings/ascii.h"
+#include "absl/strings/substitute.h"
+#include "absl/synchronization/mutex.h"
 #include "boost/algorithm/string.hpp"
 #include "boost/filesystem/operations.hpp"
 #include "boost/lexical_cast.hpp"
@@ -29,11 +34,37 @@
 #include "codec/fe_row_codec.h"
 #include "glog/logging.h"
 #include "node/sql_node.h"
-#include "yaml-cpp/yaml.h"
+#include "plan/plan_api.h"
+#include "case/test_cfg.h"
+#include "vm/engine.h"
+#include "zetasql/parser/parser.h"
+#include "planv2/ast_node_converter.h"
+#include "vm/jit_wrapper.h"
 
 namespace hybridse {
 namespace sqlcase {
 using hybridse::codec::Row;
+
+static absl::Mutex mtx;
+// working directory, where the yaml file lives
+static std::filesystem::path working_dir;
+
+static vm::HybridSeJitWrapper* createJitWrapper() {
+    hybridse::vm::Engine::InitializeGlobalLLVM();
+    base::Status s;
+    auto wrapper = vm::HybridSeJitWrapper::CreateWithDefaultSymbols(&s);
+    if (!s.isOK()) {
+        LOG(ERROR) << "fail to get jit: " << s;
+        std::exit(1);
+    }
+    return wrapper;
+}
+
+static vm::HybridSeJitWrapper* getJitWrapper() {
+    // ensuare call once by local static
+    static vm::HybridSeJitWrapper* wrapper = createJitWrapper();
+    return wrapper;
+}
 
 bool SqlCase::TTLParse(const std::string& org_type_str,
                        std::vector<int64_t>& ttls) {
@@ -262,6 +293,20 @@ bool SqlCase::ExtractSchema(const std::vector<std::string>& columns,
         LOG(WARNING) << "Invalid Schema Format";
         return false;
     }
+    // expect the string of table column schema:
+    // 1. {name}<colon>{type}
+    //    legacy specification, issues may arrise when dealing with type contains options
+    // 2. {name}<any space>{type}
+    //    favored specification, which is exactly the same as SQL table column schema,
+    //    you may nest any composed type like map in {type}
+
+    auto column_list = absl::StrJoin(columns, ",");
+    auto rs = plan::ParseTableColumSchema(column_list);
+    if (rs.ok()) {
+        table.mutable_columns()->CopyFrom(rs.value());
+        return true;
+    }
+    // fallback legacy approach
     try {
         for (auto col : columns) {
             boost::trim(col);
@@ -286,6 +331,7 @@ bool SqlCase::ExtractSchema(const std::vector<std::string>& columns,
             }
             column->set_type(type);
             column->set_is_not_null(false);
+            column->mutable_schema()->set_base_type(column->type());
         }
     } catch (const std::exception& ex) {
         LOG(WARNING) << "Fail to ExtractSchema: " << ex.what();
@@ -300,11 +346,13 @@ bool SqlCase::BuildCreateSqlFromSchema(const type::TableDef& table,
     std::string sql = "CREATE TABLE " + table.name() + "(\n";
     for (int i = 0; i < table.columns_size(); i++) {
         auto column = table.columns(i);
-        sql.append(column.name()).append(" ").append(TypeString(column.type()));
-
-        if (column.is_not_null()) {
-            sql.append(" NOT NULL");
+        auto s = codec::ColumnSchemaStr(column.schema());
+        if (!s.ok()) {
+            LOG(WARNING) << s.status();
+            return false;
         }
+        sql.append(column.name()).append(" ").append(s.value());
+
         if (isGenerateIndex || i < table.columns_size() - 1) {
             sql.append(",\n");
         }
@@ -379,12 +427,17 @@ bool SqlCase::BuildCreateSqlFromSchema(const type::TableDef& table,
         }
         // end each index
     }
-    if (1 != partition_num) {
-        sql.append(") options(partitionnum=");
-        sql.append(std::to_string(partition_num));
-        sql.append(");");
+    if (partition_num != 0) {
+        // partition_num = 0 -> unset, respect the cluster environment
+        if (1 != partition_num) {
+            sql.append(") options(partitionnum=");
+            sql.append(std::to_string(partition_num));
+            sql.append(");");
+        } else {
+            sql.append(") options(partitionnum=1, replicanum=1);");
+        }
     } else {
-        sql.append(") options(partitionnum=1, replicanum=1);");
+        sql.append(");");
     }
     *create_sql = sql;
     return true;
@@ -394,13 +447,15 @@ bool SqlCase::AddInput(const TableInfo& table_data) {
     return true;
 }
 bool SqlCase::ExtractInputData(std::vector<Row>& rows,
-                               int32_t input_idx) const {
-    return ExtractInputData(inputs_[input_idx], rows);
+                               int32_t input_idx,
+                               const codec::Schema& sc) const {
+    return ExtractInputData(inputs_[input_idx], rows, sc);
 }
 bool SqlCase::ExtractInputData(const TableInfo& input,
-                               std::vector<Row>& rows) const {
+                               std::vector<Row>& rows,
+                               const codec::Schema& sc) const {
     try {
-        if (input.data_.empty() && input.rows_.empty()) {
+        if (input.data_.empty() && input.rows_.empty() && input.inserts_.empty()) {
             LOG(WARNING) << "Empty Data String";
             return false;
         }
@@ -410,7 +465,20 @@ bool SqlCase::ExtractInputData(const TableInfo& input,
             return false;
         }
 
-        if (!input.data_.empty()) {
+        if (!input.inserts_.empty()) {
+            for (auto& sql : input.inserts_) {
+                // shit happens, resue jit cause duplcate symbols
+                // FIXME(#3748): use getJitWrapper
+                auto jit = std::unique_ptr<vm::HybridSeJitWrapper>(createJitWrapper());
+                auto rs = ExtractInsertRow(jit.get(), sql, &sc);
+                if (!rs.ok()) {
+                    LOG(ERROR) << rs.status();
+                    return false;
+                }
+
+                rows.insert(rows.end(), rs.value().begin(), rs.value().end());
+            }
+        } else if (!input.data_.empty()) {
             if (!ExtractRows(table.columns(), input.data_, rows)) {
                 return false;
             }
@@ -737,6 +805,9 @@ const std::string SqlCase::case_name() const {
 }
 bool SqlCase::ExtractInputTableDef(type::TableDef& table,
                                    int32_t input_idx) const {
+    if (inputs_.size() <= static_cast<size_t>(input_idx)) {
+        return false;
+    }
     return ExtractInputTableDef(inputs_[input_idx], table);
 }
 bool SqlCase::ExtractInputTableDef(const TableInfo& input,
@@ -832,6 +903,9 @@ bool SqlCase::BuildInsertSqlListFromInput(
             }
             sql_list->push_back(insert_sql);
         }
+    } else if (!inputs_[input_idx].inserts_.empty()) {
+        auto& inserts  = inputs_[input_idx].inserts_;
+        sql_list->insert(sql_list->end(), inserts.begin(), inserts.end());
     }
     return true;
 }
@@ -939,8 +1013,32 @@ bool SqlCase::CreateTableInfoFromYamlNode(const YAML::Node& schema_data,
     }
 
     if (schema_data["data"]) {
-        table->data_ = schema_data["data"].as<std::string>();
-        boost::trim(table->data_);
+        if (schema_data["data"].IsMap()) {
+            if (schema_data["data"]["file"].IsScalar()) {
+                // csv format only
+                auto csv_data_file_ = absl::StripAsciiWhitespace(schema_data["data"]["file"].as<std::string>());
+                if (csv_data_file_.empty()) {
+                    LOG(ERROR) << "table csv data file name is empty";
+                    return false;
+                }
+                std::ifstream ifs(working_dir / csv_data_file_);
+                if (!ifs.is_open()) {
+                    LOG(ERROR) << "can't open " << (working_dir / csv_data_file_);
+                    return false;
+                }
+                table->data_.assign((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                absl::StripAsciiWhitespace(&table->data_);
+            } else {
+                LOG(ERROR) << "inputs[*].data.file is not scalar type";
+                return false;
+            }
+        } else if (schema_data["data"].IsScalar()) {
+            table->data_ = schema_data["data"].as<std::string>();
+            boost::trim(table->data_);
+        } else {
+            LOG(ERROR) << "cases[*].inputs[*].data is not a acceptable type: " << schema_data["data"];
+            return false;
+        }
     }
 
     if (schema_data["repeat"]) {
@@ -1107,13 +1205,11 @@ bool SqlCase::CreateSqlCasesFromYaml(const std::string& cases_dir,
 bool SqlCase::CreateTableInfoFromYaml(const std::string& cases_dir,
                                       const std::string& yaml_path,
                                       TableInfo* table_info) {
-    std::string resouces_path;
+    std::filesystem::path resouces_path = yaml_path;
     if (cases_dir != "") {
-        resouces_path = cases_dir + "/" + yaml_path;
-    } else {
-        resouces_path = yaml_path;
+        resouces_path = std::filesystem::path(cases_dir) / resouces_path;
     }
-    if (!boost::filesystem::is_regular_file(resouces_path)) {
+    if (!boost::filesystem::is_regular_file(resouces_path.string())) {
         LOG(WARNING) << resouces_path << ": No such file";
         return false;
     }
@@ -1181,8 +1277,15 @@ static bool ParseSqlCaseNode(const YAML::Node& sql_case_node,
     }
     if (sql_case_node["debug"]) {
         sql_case.debug_ = sql_case_node["debug"].as<bool>();
-    } else {
-        sql_case.debug_ = false;
+    }
+    if (sql_case_node["deployable"]) {
+        sql_case.deployable_ = sql_case_node["deployable"].as<bool>();
+    }
+    if (sql_case_node["deployment"]) {
+        auto& dep = sql_case_node["deployment"];
+        if (dep["name"]) {
+            sql_case.deployment_.name_ = dep["name"].as<std::string>();
+        }
     }
     if (sql_case_node["tags"]) {
         if (!SqlCase::CreateStringListFromYamlNode(sql_case_node["tags"],
@@ -1227,8 +1330,30 @@ static bool ParseSqlCaseNode(const YAML::Node& sql_case_node,
     }
 
     if (sql_case_node["sql"]) {
-        sql_case.sql_str_ = sql_case_node["sql"].as<std::string>();
-        boost::trim(sql_case.sql_str_);
+        auto& sql_node = sql_case_node["sql"];
+        if (sql_node.IsScalar()) {
+            sql_case.sql_str_ = sql_case_node["sql"].as<std::string>();
+            boost::trim(sql_case.sql_str_);
+        } else if (sql_node.IsMap()) {
+            if (sql_node["file"].IsScalar()) {
+                auto file_path = absl::StripAsciiWhitespace(sql_node["file"].as<std::string>());
+                if (file_path.empty()) {
+                    LOG(ERROR) << "file path to sql is empty";
+                    return false;
+                }
+                auto real_path = working_dir / file_path;
+                std::ifstream ifs(real_path);
+                if (!ifs.is_open()) {
+                    LOG(ERROR) << "can't open " << real_path;
+                    return false;
+                }
+                sql_case.sql_str_.assign((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
     }
     if (sql_case_node["sqls"]) {
         sql_case.sql_strs_.clear();
@@ -1472,16 +1597,19 @@ bool SqlCase::CreateSqlCasesFromYaml(
     const std::string& cases_dir, const std::string& yaml_path,
     std::vector<SqlCase>& sql_case_ptr,
     const std::vector<std::string>& filter_modes) {
-    std::string sql_case_path;
+
+    std::filesystem::path sql_case_path = yaml_path;
     if (cases_dir != "") {
-        sql_case_path = cases_dir + "/" + yaml_path;
-    } else {
-        sql_case_path = yaml_path;
+        sql_case_path = std::filesystem::path(cases_dir) / sql_case_path;
     }
+
+    absl::MutexLock lock(&mtx);
+    working_dir = sql_case_path.parent_path();
+
     if (IsDebug()) {
         DLOG(INFO) << "SQL Cases Path: " << sql_case_path;
     }
-    if (!boost::filesystem::is_regular_file(sql_case_path)) {
+    if (!boost::filesystem::is_regular_file(sql_case_path.string())) {
         LOG(WARNING) << sql_case_path << ": No such file";
         return false;
     }
@@ -1571,46 +1699,47 @@ void InitCases(std::string yaml_path, std::vector<SqlCase>& cases,  // NOLINT
                const std::vector<std::string>& filters) {
     SqlCase::CreateSqlCasesFromYaml(hybridse::sqlcase::FindSqlCaseBaseDirPath(), yaml_path, cases, filters);
 }
-bool SqlCase::BuildCreateSpSqlFromInput(int32_t input_idx,
-                                        const std::string& select_sql,
-                                        const std::set<size_t>& common_idx,
-                                        std::string* create_sp_sql) {
-    type::TableDef table;
-    if (!ExtractInputTableDef(table, input_idx)) {
-        LOG(WARNING) << "Fail to extract table schema";
-        return false;
+absl::StatusOr<std::string> SqlCase::BuildCreateSpSql(absl::string_view select_sql, const std::set<size_t>& common_idx,
+                                                      std::optional<int32_t> input_idx) {
+    if (input_idx.has_value()) {
+        type::TableDef table;
+        if (!ExtractInputTableDef(table, input_idx.value())) {
+            return absl::FailedPreconditionError("Fail to extract table schema");
+        }
+
+        return BuildCreateSpSql(select_sql, common_idx, &table);
     }
-    if (!BuildCreateSpSqlFromSchema(table, select_sql, common_idx,
-                                    create_sp_sql)) {
-        LOG(WARNING) << "Fail to build create sql string";
-        return false;
-    }
-    return true;
+    std::optional<const type::TableDef*> tab = {};
+    return BuildCreateSpSql(select_sql, common_idx, tab);
 }
 
-bool SqlCase::BuildCreateSpSqlFromSchema(const type::TableDef& table,
-                                         const std::string& select_sql,
-                                         const std::set<size_t>& common_idx,
-                                         std::string* create_sql) {
-    std::string sql = "CREATE Procedure " + sp_name_ + "(\n";
-    for (int i = 0; i < table.columns_size(); i++) {
-        auto column = table.columns(i);
-        if (!common_idx.empty() && common_idx.count(i)) {
-            sql.append("const ");
-        }
-        sql.append(column.name()).append(" ").append(TypeString(column.type()));
-        if (i < table.columns_size() - 1) {
-            sql.append(",\n");
+absl::StatusOr<std::string> SqlCase::BuildCreateSpSql(absl::string_view select_sql, const std::set<size_t>& common_idx,
+                                                      std::optional<const type::TableDef*> tab) {
+        auto sql_view = absl::StripAsciiWhitespace(select_sql);
+        std::string query_stmt(sql_view);
+        if (query_stmt.back() != ';') {
+        absl::StrAppend(&query_stmt, ";");
+    }
+
+    std::string sql = absl::Substitute("CREATE PROCEDURE $0 (\n", sp_name_);
+    if (tab.has_value()) {
+        auto table = tab.value();
+
+        for (int i = 0; i < table->columns_size(); i++) {
+            auto column = table->columns(i);
+            if (!common_idx.empty() && common_idx.count(i)) {
+                absl::StrAppend(&sql, "const ");
+            }
+            absl::SubstituteAndAppend(&sql, "$0 $1", column.name(), TypeString(column.type()));
+            if (i < table->columns_size() - 1) {
+                absl::StrAppend(&sql, ",\n");
+            }
         }
     }
-    sql.append(")\n");
-    sql.append("BEGIN\n");
-    sql.append(select_sql);
-    sql.append("\n");
-    sql.append("END;");
-    *create_sql = sql;
-    return true;
+    absl::SubstituteAndAppend(&sql, ")\nBEGIN\n$0\nEND;", query_stmt);
+    return sql;
 }
+
 std::set<std::string> SqlCase::HYBRIDSE_LEVEL() {
     const char* env_name = "HYBRIDSE_LEVEL";
     char* value = getenv(env_name);
@@ -1634,11 +1763,50 @@ std::string SqlCase::SqlCaseBaseDir() {
     if (value != nullptr) {
         return std::string(value);
     }
-    value = getenv("YAML_CASE_BASE_DIR");
-    if (value != nullptr) {
-        return std::string(value);
+    return SQL_CASE_BASE_DIR;
+}
+
+absl::StatusOr<std::vector<codec::Row>> ExtractInsertRow(vm::HybridSeJitWrapper* jit, absl::string_view insert,
+                                                         const codec::Schema* table_schema) {
+    zetasql::ParserOptions parser_opts;
+    zetasql::LanguageOptions language_opts;
+    language_opts.EnableLanguageFeature(zetasql::FEATURE_V_1_3_COLUMN_DEFAULT_VALUE);
+    parser_opts.set_language_options(&language_opts);
+    std::unique_ptr<zetasql::ParserOutput> parser_output;
+    auto zetasql_status = zetasql::ParseStatement(insert, parser_opts, &parser_output);
+    CHECK_ABSL_STATUS(zetasql_status);
+
+    node::SqlNode* sql_node = nullptr;
+    node::NodeManager nm;
+    CHECK_STATUS_TO_ABSL(plan::ConvertStatement(parser_output->statement(), &nm, &sql_node));
+
+    auto* insert_stmt = sql_node->GetAsOrNull<node::InsertStmt>();
+    if (insert_stmt == nullptr) {
+        return absl::FailedPreconditionError("not a insert statement");
     }
-    return "";
+
+    if (!insert_stmt->columns_.empty()) {
+        // implementation limitation
+        return absl::UnimplementedError("insert with custom columns not support");
+    }
+
+    codec::RowBuilder2 builder(jit, std::vector<codec::Schema>{*table_schema});
+
+    CHECK_STATUS_TO_ABSL(builder.Init());
+
+    std::vector<codec::Row> rows;
+    for (auto expr : insert_stmt->values_) {
+        auto expr_list = expr->GetAsOrNull<node::ExprListNode>();
+        if (expr_list == nullptr) {
+            return absl::FailedPreconditionError(
+                absl::Substitute("unexpected insert statement value: $0", expr->GetExprString()));
+        }
+        codec::Row row;
+        CHECK_STATUS_TO_ABSL(builder.Build(expr_list->children_, &row));
+        rows.push_back(row);
+    }
+
+    return rows;
 }
 }  // namespace sqlcase
 }  // namespace hybridse

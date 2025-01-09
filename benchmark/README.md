@@ -2,6 +2,8 @@
 
 OpenMLDB Benchmak tool is used for tesing the performance of OpenMLDB's online SQL engine.
 
+**You may also refer to FEBench (https://github.com/decis-bench/febench), which is a more comprehensive benchmark for real-time feature extraction developed by a third-party, comparing the performance between OpenMLDB and Flink.**
+
 ## Requirements
 
 - CentOS 7 / macOS >= 10.15
@@ -9,17 +11,16 @@ OpenMLDB Benchmak tool is used for tesing the performance of OpenMLDB's online S
 
 ## Run
 
- 1. Compile
+1. Compile
     ```bash
     cd benchmark
     mvn clean package
     ```
-2. Uncompress the package to `lib` dir and copy the configuration to `conf` dir
+2. Copy the configuration and package
     ```bash
     mkdir -p /work/benchmark/conf /work/benchmark/lib
     cp target/openmldb-benchmark-0.5.0.jar  /work/benchmark/lib
     cp src/main/resources/conf.properties /work/benchmark/conf
-    cd /work/benchmark/lib && jar -xvf openmldb-benchmark-0.5.0.jar
     ```
 3. Modify the configuration
     ```
@@ -29,7 +30,7 @@ OpenMLDB Benchmak tool is used for tesing the performance of OpenMLDB's online S
 4. Run benchmark
     ```
     cd /work/benchmark
-    java -cp conf/:lib/ com._4paradigm.openmldb.benchmark.OpenMLDBPerfBenchmark
+    java -cp conf/:lib/* com._4paradigm.openmldb.benchmark.OpenMLDBPerfBenchmark
     ```
 
 The above testing run with the default confguration. You can modify `WINDOW_NUM`, `WINDOW_SIZE` and `JOIN_NUM` in the confguration file if you want to evaluate the performance impact of those parameters.
@@ -49,3 +50,56 @@ Update `WINDOW_SIZE` in confguration file and execute the following command.
 ```
 java -cp conf/:lib/ com._4paradigm.openmldb.benchmark.OpenMLDBLongWindowBenchmark
 ```
+
+Note:
+If you want to test specific SQL, you can modify [here](https://github.com/4paradigm/OpenMLDB/blob/main/benchmark/src/main/java/com/_4paradigm/openmldb/benchmark/Util.java#L71)
+
+
+### Memory Usage Benchmark
+##### Compare with Redis
+We provide two ways to measure OpenMLDB's memory usage. First, you can conduct comparative testing using a dataset composed of randomly generated data in a specified format. Second, you can conduct comparative testing using the existing TalkingData dataset.
+1. Configure [memory.properties](src%2Fmain%2Fresources%2Fmemory.properties)
+
+   You need to configure the service addresses for your OpenMLDB and Redis instances in the configuration file. Additionally, you can configure parameters such as KEY_LENGTH, VALUE_LENGTH, VALUE_PER_KEY, and TOTAL_KEY_NUM based on your requirements, which are used for Approach One.
+
+2. Start the test by executing the following command:
+   ```
+   # using generated dataset
+   java -cp conf/:lib/* com._4paradigm.openmldb.memoryusagecompare.BenchmarkMemoryUsage
+   
+   # using TalkingData
+   java -cp conf/:lib/* com._4paradigm.openmldb.memoryusagecompare.BenchmarkMemoryUsageByTalkingData
+   ```
+3. The test report will be printed at the end of the test execution.
+
+##### Index Memory Usage
+Similar to memory usage comparison testing, we also provide two approaches for testing index memory usage.
+1. Configure [memory.properties](src%2Fmain%2Fresources%2Fmemory.properties).
+
+   Configure the service addresses for your OpenMLDB.
+2. Start the test by executing the following command:
+   ```
+   # using generated dataset
+   java -cp conf/:lib/* com._4paradigm.openmldb.memoryusagecompare.BenchmarkIndexMemoryUsage
+   
+   # using TalkingData
+   java -cp conf/:lib/* com._4paradigm.openmldb.memoryusagecompare.BenchmarkIndexMemoryUsageByTalkingData
+   ```
+3. The test report will be printed at the end of the test execution.
+
+
+Note:
+1. You can get the TalkingData sample dataset from [here](https://github.com/4paradigm/OpenMLDB/blob/main/demo/talkingdata-adtracking-fraud-detection/train_sample.csv), or you can get the full TalkingData training dataset from [here](https://www.kaggle.com/c/talkingdata-adtracking-fraud-detection/data).
+2. The full TalkingData dataset is too large, so we recommend extracting a portion of it for testing.
+
+### Query Performance Comparison
+Comparing the query performance of OpenMLDB and Redis under the same scenario.
+1. Configure [memory.properties](src%2Fmain%2Fresources%2Fmemory.properties).
+
+   Configure the service addresses for your OpenMLDB and Redis instances, and modify the configuration parameters in the 'query perf test' section according to the requirements.
+2. (Optional) Load data into OpenMLDB.
+3. Start the test by executing the following command:
+   ```
+   java -cp conf/:lib/* com._4paradigm.openmldb.memoryusagecompare.BenchmarkQueryPerf
+   ```
+4. The test report will be printed at the end of the test execution.

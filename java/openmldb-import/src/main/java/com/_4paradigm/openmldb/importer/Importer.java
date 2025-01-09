@@ -74,7 +74,7 @@ public class Importer {
     @CommandLine.Option(names = "--table", description = "openmldb table", required = true)
     private String tableName;
 
-    @CommandLine.Option(names = "--create_ddl", description = "if force_recreate_table is true, provide the create table sql", defaultValue = "")
+    @CommandLine.Option(names = "--create_ddl", description = "if table is not exists or force_recreate_table is true, provide the create table sql", defaultValue = "")
     private String createDDL;
     @CommandLine.Option(names = {"-f", "--force_recreate_table"}, description = "if true, we will drop the table first")
     private boolean forceRecreateTable;
@@ -87,6 +87,12 @@ public class Importer {
     private int rpcWriteTimeout;
     @CommandLine.Option(names = "--rpc_read_timeout", description = "rpc read timeout(ms)", defaultValue = "50000")
     private int rpcReadTimeout;
+
+    @CommandLine.Option(names = "--user", description = "the user to connect OpenMLDB", defaultValue = "root")
+    private String user;
+
+    @CommandLine.Option(names = "--password", description = "the password", defaultValue = "")
+    private String password;
 
     FilesReader reader = null;
     SqlExecutor router = null;
@@ -108,6 +114,8 @@ public class Importer {
         SdkOption option = new SdkOption();
         option.setZkCluster(zkCluster);
         option.setZkPath(zkRootPath);
+        option.setUser(user);
+        option.setPassword(password);
         try {
             router = new SqlClusterExecutor(option);
             return true;

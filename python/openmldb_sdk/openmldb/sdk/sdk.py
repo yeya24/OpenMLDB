@@ -31,52 +31,63 @@ from warnings import warn
 logger = logging.getLogger("OpenMLDB_sdk")
 
 
-class OpenMLDBClusterSdkOptions(object):
-    def __init__(self, zk_cluster, zk_path, session_timeout=3000, spark_conf_path=""):
-        self.zk_cluster = zk_cluster
-        self.zk_path = zk_path
-        self.zk_session_timeout = session_timeout
-        self.spark_conf_path = spark_conf_path
-
-
-class OpenMLDBStandaloneSdkOptions(object):
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-
-
 class OpenMLDBSdk(object):
-    def __init__(self, options, is_cluster_mode):
-        self.is_cluster_mode = is_cluster_mode
-        self.options = options
+    """
+    all methods with the arg db: if db is None, use the db setting in sql router; otherwise, use the arg db
+    Upper layer(e.g. dbapi) usually set the arg db to None
+    """
+
+    def __init__(self, **options_map):
+        self.options_map = options_map
         self.sdk = None
 
     def init(self):
-        if self.is_cluster_mode:
+        is_cluster_mode = True if 'zkPath' in self.options_map else False
+        if is_cluster_mode:
             options = sql_router_sdk.SQLRouterOptions()
-            options.zk_cluster = self.options.zk_cluster
-            options.zk_path = self.options.zk_path
-            self.sdk = sql_router_sdk.NewClusterSQLRouter(options)
-            if not self.sdk:
-                logger.error("fail to init OpenMLDB sdk with zk cluster %s and zk path %s" % (
-                    options.zk_cluster, options.zk_path))
-                return False
-            logger.info("init OpenMLDB sdk done with zk cluster %s and zk path %s" % (
-                options.zk_cluster, options.zk_path))
+            options.zk_cluster = self.options_map['zk']
+            options.zk_path = self.options_map['zkPath']
+            # optionals
+            if 'zkLogLevel' in self.options_map:
+                options.zk_log_level = int(self.options_map['zkLogLevel'])
+            if 'zkLogFile' in self.options_map:
+                options.zk_log_file = self.options_map['zkLogFile']
+            if 'zkCert' in self.options_map:
+                options.zk_cert = self.options_map['zkCert']
         else:
             options = sql_router_sdk.StandaloneOptions()
-            options.host = self.options.host
-            options.port = self.options.port
-            self.sdk = sql_router_sdk.NewStandaloneSQLRouter(options)
-            if not self.sdk:
-                logger.error("fail to init OpenMLDB sdk with host %s and port %s" % (
-                    options.host, options.port))
-                return False
-            logger.info(
-                "init openmldb sdk done with host %s and port %s" % (options.host, options.port))
+            # use host
+            if 'zkPath' not in self.options_map:
+                options.host = self.options_map['host']
+                options.port = int(self.options_map['port'])
+
+        # common options
+        if 'requestTimeout' in self.options_map:
+            options.request_timeout = int(self.options_map['requestTimeout'])
+        if 'glogLevel' in self.options_map:
+            options.glog_level = int(self.options_map['glogLevel'])
+        if 'glogDir' in self.options_map:
+            options.glog_dir = self.options_map['glogDir']
+        if 'maxSqlCacheSize' in self.options_map:
+            options.max_sql_cache_size = int(
+                self.options_map['maxSqlCacheSize'])
+        if 'user' in self.options_map:
+            options.user = self.options_map['user']
+        if 'password' in self.options_map:
+            options.password = self.options_map['password']
+
+        self.sdk = sql_router_sdk.NewClusterSQLRouter(
+            options
+        ) if is_cluster_mode else sql_router_sdk.NewStandaloneSQLRouter(options)
+        if not self.sdk:
+            raise Exception(
+                f"fail to init OpenMLDB sdk with {self.options_map}, is cluster mode {is_cluster_mode}")
+
+        logger.info(f"init openmldb sdk done with {self.options_map}, is cluster mode {is_cluster_mode}")
         status = sql_router_sdk.Status()
         self.sdk.ExecuteSQL("SET @@execute_mode='online'", status)
-        return True
+        if not status.IsOK():
+            raise Exception(f"fail to set online mode, {status.ToString()}")
 
     def getDatabases(self):
         if not self.sdk:
@@ -85,7 +96,7 @@ class OpenMLDBSdk(object):
         dbs = sql_router_sdk.VectorString()
         status = sql_router_sdk.Status()
         self.sdk.ShowDB(dbs, status)
-        if status.code != 0:
+        if not status.IsOK():
             return False
         output_dbs = []
         for i in range(dbs.size()):
@@ -99,7 +110,7 @@ class OpenMLDBSdk(object):
         if self.sdk.CreateDB(db, status):
             return True, ""
         else:
-            return False, status.msg
+            return False, status.ToString()
 
     def dropDB(self, db):
         if not self.sdk:
@@ -108,7 +119,7 @@ class OpenMLDBSdk(object):
         if self.sdk.DropDB(db, status):
             return True, "ok"
         else:
-            return False, status.msg
+            return False, status.ToString()
 
     def getTables(self, db):
         if not self.sdk:
@@ -119,6 +130,11 @@ class OpenMLDBSdk(object):
         if not self.sdk:
             raise Exception("please init sdk first")
         return self.sdk.GetAllTables()
+
+    def getDatabase(self):
+        if not self.sdk:
+            raise Exception("please init sdk first")
+        return self.sdk.GetDatabase()
 
     def isOnlineMode(self):
         if not self.sdk:
@@ -162,55 +178,55 @@ class OpenMLDBSdk(object):
         if not self.sdk:
             return False, "please init sdk first"
         status = sql_router_sdk.Status()
-        row_builder = self.sdk.GetInsertRow(db, sql, status)
-        if status.code != 0:
-            return False, status.msg
+        row_builder = self.sdk.GetInsertRow(db if db else self.getDatabase(),
+                                            sql, status)
+        if not status.IsOK():
+            return False, status.ToString()
         return True, row_builder
 
     def getInsertBatchBuilder(self, db, sql):
         if not self.sdk:
             return False, "please init sdk first"
         status = sql_router_sdk.Status()
-        rows_builder = self.sdk.GetInsertRows(db, sql, status)
-        if status.code != 0:
-            return False, status.msg
+        rows_builder = self.sdk.GetInsertRows(db if db else self.getDatabase(),
+                                              sql, status)
+        if not status.IsOK():
+            return False, status.ToString()
         return True, rows_builder
 
     def executeInsert(self, db, sql, row_builder=None):
         if not self.sdk:
             return False, "please init sdk first"
+        cdb = db if db else self.getDatabase()
         status = sql_router_sdk.Status()
-        if row_builder is not None:
-            if self.sdk.ExecuteInsert(db, sql, row_builder, status):
-                return True, ""
-            else:
-                return False, status.msg
-        else:
-            if self.sdk.ExecuteInsert(db, sql, status):
-                return True, ""
-            else:
-                return False, status.msg
+        ok = self.sdk.ExecuteInsert(
+            cdb, sql, row_builder,
+            status) if row_builder else self.sdk.ExecuteInsert(
+                cdb, sql, status)
+        return (True, "") if ok else (False, status.ToString())
 
     def getRequestBuilder(self, db, sql):
         if not self.sdk:
             return False, "please init sdk first"
         status = sql_router_sdk.Status()
-        row_builder = self.sdk.GetRequestRow(db, sql, status)
-        if status.code != 0:
-            return False, status.msg
+        row_builder = self.sdk.GetRequestRow(db if db else self.getDatabase(),
+                                             sql, status)
+        if not status.IsOK():
+            return False, status.ToString()
         return True, row_builder
 
     def doRequestQuery(self, db, sql, data):
         if data is None:
             return False, "please init request data"
-        ok, requestRow = self.getRequestBuilder(db, sql)
+        cdb = db if db else self.getDatabase()
+        ok, requestRow = self.getRequestBuilder(cdb, sql)
         if not ok:
             return ok, requestRow
         schema = requestRow.GetSchema()
         ok, msg = self._append_request_row(requestRow, schema, data)
         if not ok:
             return ok, msg
-        return self.executeSQL(db, sql, requestRow)
+        return self.executeSQL(cdb, sql, requestRow)
 
     def doParameterizedQuery(self, db, sql, data):
         logging.debug("doParameterizedQuery data: %s", str(data))
@@ -229,6 +245,10 @@ class OpenMLDBSdk(object):
         warn('This method is deprecated.', DeprecationWarning)
         return self.executeSQL(db, sql, row_builder)
 
+    def execute(self, sql, row_builder=None):
+        """no db style"""
+        return self.executeSQL(None, sql, row_builder=row_builder)
+
     def executeSQL(self, db, sql, row_builder=None):
         """
         1. no row_builder: batch mode
@@ -238,17 +258,16 @@ class OpenMLDBSdk(object):
         if not self.sdk:
             return False, "please init sdk first"
 
+        cdb = db if db else self.getDatabase()
         status = sql_router_sdk.Status()
         if row_builder is not None:
-            # TODO(hw): must set db in request mode now, fix later
-            rs = self.sdk.ExecuteSQLRequest(db, sql, row_builder, status)
-        elif db:
-            rs = self.sdk.ExecuteSQL(db, sql, status)
+            rs = self.sdk.ExecuteSQLRequest(cdb, sql, row_builder, status)
         else:
             # if no db specific in here, use the current db in sdk
-            rs = self.sdk.ExecuteSQL(sql, status)
-        if status.code != 0:
-            return False, status.msg
+            rs = self.sdk.ExecuteSQL(cdb, sql, status)
+
+        if not status.IsOK():
+            return False, status.ToString()
         else:
             return True, rs
 
@@ -260,35 +279,39 @@ class OpenMLDBSdk(object):
             return False, "pealse init parameter row"
 
         status = sql_router_sdk.Status()
-        rs = self.sdk.ExecuteSQLParameterized(db, sql, row_builder, status)
-        if status.code != 0:
-            return False, status.msg
+        rs = self.sdk.ExecuteSQLParameterized(db if db else self.getDatabase(),
+                                              sql, row_builder, status)
+
+        if not status.IsOK():
+            return False, status.ToString()
         else:
             return True, rs
 
     def getRowBySp(self, db, sp):
         status = sql_router_sdk.Status()
-        row_builder = self.sdk.GetRequestRowByProcedure(db, sp, status)
-        if status.code != 0:
-            return False, status.msg
+        row_builder = self.sdk.GetRequestRowByProcedure(
+            db if db else self.getDatabase(), sp, status)
+        if not status.IsOK():
+            return False, status.ToString()
         return True, row_builder
 
     def callProc(self, db, sp, rq):
         status = sql_router_sdk.Status()
         rs = self.sdk.CallProcedure(db, sp, rq, status)
-        if status.code != 0:
-            return False, status.msg
+        if not status.IsOK():
+            return False, status.ToString()
         return True, rs
 
     def doProc(self, db, sp, data):
-        ok, requestRow = self.getRowBySp(db, sp)
+        cdb = db if db else self.getDatabase()
+        ok, requestRow = self.getRowBySp(cdb, sp)
         if not ok:
             return ok, "get row by sp failed"
         schema = requestRow.GetSchema()
         ok, msg = self._append_request_row(requestRow, schema, data)
         if not ok:
             return ok, msg
-        return self.callProc(db, sp, requestRow)
+        return self.callProc(cdb, sp, requestRow)
 
     def _append_request_row(self, requestRow, schema, data):
         if isinstance(data, dict):
@@ -303,7 +326,7 @@ class OpenMLDBSdk(object):
             logging.debug("extract datetime/timestamp with string item")
             try:
                 dt = datetime.fromisoformat(x)
-                return True, int(dt.timestamp()*1000)
+                return True, int(dt.timestamp() * 1000)
             except Exception as e:
                 return False, "fail extract date from string {}".format(e)
         elif isinstance(x, int):
@@ -311,13 +334,14 @@ class OpenMLDBSdk(object):
             return True, x
         elif isinstance(x, datetime):
             logging.debug("extract datetime/timestamp with datetime item")
-            return True, int(x.timestamp()*1000)
+            return True, int(x.timestamp() * 1000)
         elif isinstance(x, date):
             logging.debug("extract datetime/timestamp with date item")
             dt = datetime(x.year, x.month, x.day, 0, 0, 0)
-            return True, int(dt.timestamp()*1000)
+            return True, int(dt.timestamp() * 1000)
         else:
-            return False, "fail extract datetime, invalid type {}".format(type(x))
+            return False, "fail extract datetime, invalid type {}".format(
+                type(x))
 
     def _extract_date(self, x):
         if isinstance(x, str):
@@ -334,19 +358,30 @@ class OpenMLDBSdk(object):
             logging.debug("append date with date item")
             return True, (x.year, x.month, x.day)
         else:
-            return False, "fail to extract date, invallid type {}".format(type(x))
+            return False, "fail to extract date, invallid type {}".format(
+                type(x))
 
     def _append_request_row_with_tuple(self, requestRow, schema, data):
         appendMap = {
-            sql_router_sdk.kTypeBool: requestRow.AppendBool,
-            sql_router_sdk.kTypeInt16: requestRow.AppendInt16,
-            sql_router_sdk.kTypeInt32: requestRow.AppendInt32,
-            sql_router_sdk.kTypeInt64: requestRow.AppendInt64,
-            sql_router_sdk.kTypeFloat: requestRow.AppendFloat,
-            sql_router_sdk.kTypeDouble: requestRow.AppendDouble,
-            sql_router_sdk.kTypeString: requestRow.AppendString,
-            sql_router_sdk.kTypeDate: lambda x: len(x) == 3 and requestRow.AppendDate(x[0], x[1], x[2]),
-            sql_router_sdk.kTypeTimestamp: requestRow.AppendTimestamp
+            sql_router_sdk.kTypeBool:
+                requestRow.AppendBool,
+            sql_router_sdk.kTypeInt16:
+                requestRow.AppendInt16,
+            sql_router_sdk.kTypeInt32:
+                requestRow.AppendInt32,
+            sql_router_sdk.kTypeInt64:
+                requestRow.AppendInt64,
+            sql_router_sdk.kTypeFloat:
+                requestRow.AppendFloat,
+            sql_router_sdk.kTypeDouble:
+                requestRow.AppendDouble,
+            sql_router_sdk.kTypeString:
+                requestRow.AppendString,
+            sql_router_sdk.kTypeDate:
+                lambda x: len(x) == 3 and requestRow.AppendDate(
+                    x[0], x[1], x[2]),
+            sql_router_sdk.kTypeTimestamp:
+                requestRow.AppendTimestamp
         }
         count = schema.GetColumnCnt()
         strSize = 0
@@ -388,15 +423,25 @@ class OpenMLDBSdk(object):
 
     def _append_request_row_with_dict(self, requestRow, schema, data):
         appendMap = {
-            sql_router_sdk.kTypeBool: requestRow.AppendBool,
-            sql_router_sdk.kTypeInt16: requestRow.AppendInt16,
-            sql_router_sdk.kTypeInt32: requestRow.AppendInt32,
-            sql_router_sdk.kTypeInt64: requestRow.AppendInt64,
-            sql_router_sdk.kTypeFloat: requestRow.AppendFloat,
-            sql_router_sdk.kTypeDouble: requestRow.AppendDouble,
-            sql_router_sdk.kTypeString: requestRow.AppendString,
-            sql_router_sdk.kTypeDate: lambda x: len(x) == 3 and requestRow.AppendDate(x[0], x[1], x[2]),
-            sql_router_sdk.kTypeTimestamp: requestRow.AppendTimestamp
+            sql_router_sdk.kTypeBool:
+                requestRow.AppendBool,
+            sql_router_sdk.kTypeInt16:
+                requestRow.AppendInt16,
+            sql_router_sdk.kTypeInt32:
+                requestRow.AppendInt32,
+            sql_router_sdk.kTypeInt64:
+                requestRow.AppendInt64,
+            sql_router_sdk.kTypeFloat:
+                requestRow.AppendFloat,
+            sql_router_sdk.kTypeDouble:
+                requestRow.AppendDouble,
+            sql_router_sdk.kTypeString:
+                requestRow.AppendString,
+            sql_router_sdk.kTypeDate:
+                lambda x: len(x) == 3 and requestRow.AppendDate(
+                    x[0], x[1], x[2]),
+            sql_router_sdk.kTypeTimestamp:
+                requestRow.AppendTimestamp
         }
         count = schema.GetColumnCnt()
         strSize = 0
@@ -441,7 +486,9 @@ class OpenMLDBSdk(object):
         return ok, ""
 
     def doBatchRowRequest(self, db, sql, commonCol, parameters):
-        ok, requestRow = self.getRequestBuilder(db, sql)
+        # We'll use db in multi steps. To avoid db change, we cache it first.
+        cdb = db if db else self.getDatabase()
+        ok, requestRow = self.getRequestBuilder(cdb, sql)
         if not ok:
             return ok, "get request builder fail"
         schema = requestRow.GetSchema()
@@ -469,13 +516,13 @@ class OpenMLDBSdk(object):
                 if not ok:
                     return ok, msg
                 requestRowBatch.AddRow(requestRow)
-                ok, requestRow = self.getRequestBuilder(db, sql)
+                ok, requestRow = self.getRequestBuilder(cdb, sql)
                 if not ok:
                     return ok, "get request builder fail"
         status = sql_router_sdk.Status()
-        rs = self.sdk.ExecuteSQLBatchRequest(db, sql, requestRowBatch, status)
-        if status.code != 0:
-            return False, status.msg
+        rs = self.sdk.ExecuteSQLBatchRequest(cdb, sql, requestRowBatch, status)
+        if not status.IsOK():
+            return False, status.ToString()
         return True, rs
 
     def getJobLog(self, id):
@@ -485,7 +532,7 @@ class OpenMLDBSdk(object):
         status = sql_router_sdk.Status()
 
         log = self.sdk.GetJobLog(id, status)
-        if status.code != 0:
+        if not status.IsOK():
             # TODO: Throw exception if get failure status
             return ""
 

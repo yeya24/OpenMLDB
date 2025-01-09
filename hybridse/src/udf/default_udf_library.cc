@@ -16,19 +16,23 @@
 
 #include "udf/default_udf_library.h"
 
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <queue>
 #include <string>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include <queue>
-#include <functional>
 
-#include "absl/strings/str_cat.h"
+#include "absl/cleanup/cleanup.h"
 #include "codegen/date_ir_builder.h"
 #include "codegen/string_ir_builder.h"
 #include "codegen/timestamp_ir_builder.h"
 #include "udf/containers.h"
+#include "udf/default_defs/date_and_time_def.h"
+#include "udf/default_defs/expr_def.h"
 #include "udf/udf.h"
 #include "udf/udf_registry.h"
 
@@ -43,7 +47,8 @@ namespace hybridse {
 namespace udf {
 
 DefaultUdfLibrary* DefaultUdfLibrary::MakeDefaultUdf() {
-    LOG(INFO) << "Creating DefaultUdfLibrary";
+    absl::Time begin = absl::Now();
+    absl::Cleanup clean = [&]() { LOG(INFO) << "Created DefaultUdfLibrary in " << absl::Now() - begin; };
     return new DefaultUdfLibrary();
 }
 
@@ -269,6 +274,54 @@ struct AvgUdafDef {
                                         nm->MakeCastNode(node::DataType::kDouble, nm->MakeConstNode()),
                                         nm->MakeBinaryExprNode(sum, cnt, node::kFnOpFDiv));
             });
+    }
+};
+
+template <typename T>
+struct EwAvgUdafDef {
+    struct EwState {
+        double sum = 0;
+        double cnt = 0;
+        double weight = 1.0;
+        bool is_null = true;
+    };
+
+    using ContainerT = EwState;
+    void operator()(UdafRegistryHelper& helper) {  // NOLINT
+        std::string suffix = ".opaque_ewstate_" + DataTypeTrait<T>::to_string();
+        helper.templates<Nullable<double>, Opaque<ContainerT>, Nullable<T>, Nullable<double>>()
+            .init("ew_avg_init" + suffix, Init)
+            .update("ew_avg_update" + suffix, Update)
+            .output("ew_avg_output" + suffix, reinterpret_cast<void *>(Output), true);
+    }
+
+    static void Init(ContainerT* ptr) {
+        new (ptr) ContainerT();
+    }
+
+    // data is fed in the reverse order of timestamp. Newer data comes first
+    static ContainerT* Update(ContainerT* ptr, T t, bool is_null, double alpha, bool alpha_is_null) {
+        if (alpha_is_null) {
+            alpha = 0;
+        }
+
+        if (!is_null) {
+            ptr->sum += ptr->weight * t;
+            ptr->cnt += ptr->weight;
+            ptr->weight = ptr->weight * (1 - alpha);
+            ptr->is_null = false;
+        }
+        return ptr;
+    }
+
+    static void Output(ContainerT* ptr, double* ret, bool* is_null) {
+        if (ptr->is_null || ptr->cnt == 0) {
+            *is_null = true;
+        } else {
+            *ret = ptr->sum / ptr->cnt;
+            *is_null = false;
+        }
+        ptr->~ContainerT();
     }
 };
 
@@ -552,6 +605,77 @@ struct TopKDef {
     }
 };
 
+template <typename T>
+struct DrawdownUdafDef {
+    // <current drawdown, current min>
+    using ContainerT = std::pair<double, T>;
+    void operator()(UdafRegistryHelper& helper) {  // NOLINT
+        std::string suffix = ".opaque_std_pair_double_" + DataTypeTrait<T>::to_string();
+        helper.templates<Nullable<double>, Opaque<ContainerT>, Nullable<T>>()
+            .init("draw_init" + suffix, Init)
+            .update("draw_update" + suffix, Update)
+            .output("draw_output" + suffix, reinterpret_cast<void *>(Output), true);
+    }
+
+    static void Init(ContainerT* ptr) {
+        new (ptr) ContainerT(-1, std::numeric_limits<T>::max());
+    }
+
+    // data is fed in the reverse order of timestamp. Newer data comes first
+    static ContainerT* Update(ContainerT* ptr, T t, bool is_null) {
+        if (!is_null) {
+            if (t < 0) {
+                LOG_FIRST_N(ERROR, 1) << "drawdown only supports positive values";
+                return ptr;
+            }
+
+            double curr_max_d = 0;
+            if (ptr->second < t) {
+                if (t != 0) {
+                    curr_max_d = static_cast<double>(t - ptr->second) / t;
+                }
+            } else {
+                ptr->second = t;
+            }
+
+            ptr->first = std::max(ptr->first, curr_max_d);
+        }
+        return ptr;
+    }
+
+    static void Output(ContainerT* ptr, double* ret, bool* is_null) {
+        if (ptr->first < 0) {
+            *is_null = true;
+        } else {
+            *ret = ptr->first;
+            *is_null = false;
+        }
+        ptr->~ContainerT();
+    }
+};
+
+void DefaultUdfLibrary::Init() {
+    udf::RegisterNativeUdfToModule(this);
+    InitLogicalUdf();
+    InitTimeAndDateUdf();
+    InitTypeUdf();
+    InitMathUdf();
+    InitStringUdf();
+
+    InitWindowFunctions();
+    InitUdaf();
+    InitFeatureSignature();
+    InitFeatureZero();
+
+    InitArrayUdfs();
+    InitMapUdfs();
+    InitEarthDistanceUdf();
+    InitJsonUdfs();
+
+    AddExternalFunction("init_udfcontext.opaque",
+            reinterpret_cast<void*>(static_cast<void (*)(UDFContext* context)>(udf::v1::init_udfcontext)));
+}
+
 void DefaultUdfLibrary::InitStringUdf() {
     RegisterExternalTemplate<v1::ToHex>("hex")
         .args_in<int16_t, int32_t, int64_t, float, double>()
@@ -584,6 +708,27 @@ void DefaultUdfLibrary::InitStringUdf() {
                 --output "537061726B2053514C"
             @endcode
             @since 0.6.0)");
+
+    RegisterExternal("unhex")
+        .args<StringRef>(reinterpret_cast<void*>(static_cast<void (*)(StringRef*, StringRef*, bool*)>(udf::v1::unhex)))
+        .return_by_arg(true)
+        .returns<Nullable<StringRef>>()
+        .doc(R"(
+            @brief Convert hexadecimal to binary string.
+
+            Example:
+
+            @code{.sql}
+                select unhex("537061726B2053514C");
+                --output "Spark SQL"
+
+                select unhex("7B");
+                --output "{"
+
+                select unhex("zfk");
+                --output NULL
+            @endcode
+            @since 0.7.0)");
 
     RegisterExternalTemplate<v1::ToString>("string")
         .args_in<int16_t, int32_t, int64_t, float, double>()
@@ -653,7 +798,7 @@ void DefaultUdfLibrary::InitStringUdf() {
     RegisterCodeGenUdf("concat").variadic_args<>(
         /* infer */
         [](UdfResolveContext* ctx,
-           const std::vector<const ExprAttrNode*>& arg_attrs,
+           const std::vector<ExprAttrNode>& arg_attrs,
            ExprAttrNode* out) {
             out->SetType(ctx->node_manager()->MakeTypeNode(node::kVarchar));
             out->SetNullable(false);
@@ -661,7 +806,7 @@ void DefaultUdfLibrary::InitStringUdf() {
         },
         /* gen */
         [](CodeGenContext* ctx, const std::vector<NativeValue>& args,
-           NativeValue* out) {
+           const ExprAttrNode& return_info, NativeValue* out) {
             codegen::StringIRBuilder string_ir_builder(ctx->GetModule());
             return string_ir_builder.Concat(ctx->GetCurrentBlock(), args, out);
         })
@@ -680,16 +825,16 @@ void DefaultUdfLibrary::InitStringUdf() {
     RegisterCodeGenUdf("concat_ws")
         .variadic_args<AnyArg>(
             /* infer */
-            [](UdfResolveContext* ctx, const ExprAttrNode* arg,
-               const std::vector<const ExprAttrNode*>& arg_types,
+            [](UdfResolveContext* ctx, const ExprAttrNode& arg,
+               const std::vector<ExprAttrNode>& arg_types,
                ExprAttrNode* out) {
                 out->SetType(ctx->node_manager()->MakeTypeNode(node::kVarchar));
                 out->SetNullable(false);
                 return Status::OK();
             },
             /* gen */
-            [](CodeGenContext* ctx, NativeValue arg,
-               const std::vector<NativeValue>& args, NativeValue* out) {
+            [](CodeGenContext* ctx, NativeValue arg, const std::vector<NativeValue>& args,
+               const ExprAttrNode& return_info, NativeValue* out) {
                 codegen::StringIRBuilder string_ir_builder(ctx->GetModule());
 
                 return string_ir_builder.ConcatWS(ctx->GetCurrentBlock(), arg,
@@ -766,6 +911,47 @@ void DefaultUdfLibrary::InitStringUdf() {
 
     RegisterAlias("substr", "substring");
 
+    RegisterExternal("locate")
+    .args<StringRef, StringRef>(
+        static_cast<int32_t (*)(StringRef*, StringRef*)>(udf::v1::locate))
+    .doc(R"(
+        @brief Returns the position of the first occurrence of substr in str. The given pos and return value are 1-based.
+                This is a version of the `locate` function where `pos` has a default value of 1.
+
+        Example:
+
+        @code{.sql}
+
+            select locate("wo", "hello world");
+            --output 7
+            
+        @endcode)");
+
+    RegisterExternal("locate")
+        .args<StringRef, StringRef, int32_t>(
+            static_cast<int32_t (*)(StringRef*, StringRef*, int32_t)>(udf::v1::locate))
+        .doc(R"(
+            @brief Returns the position of the first occurrence of substr in str after position pos. The given pos and return value are 1-based.
+
+            Example:
+
+            @code{.sql}
+
+                select locate("wo", "hello world", 2);
+                --output 7
+                
+                select locate("Wo", "hello world", 2);
+                --output 0
+                
+            @endcode
+
+            @param substr
+            @param str
+            @param pos: define the begining search position of the str.
+             - Negetive value is illegal and will return 0 directly;
+             - If substr is "" and pos less equal len(str) + 1, return pos, other case return 0;
+        )");
+
     RegisterExternal("strcmp")
         .args<StringRef, StringRef>(
             static_cast<int32_t (*)(StringRef*, StringRef*)>(
@@ -812,7 +998,7 @@ void DefaultUdfLibrary::InitStringUdf() {
             Example:
 
             @code{.sql}
-                select date_format(date(1590115420000),"%Y-%m-%d");
+                select date_format(date(timestamp(1590115420000)),"%Y-%m-%d");
                 --output "2020-05-22"
             @endcode)");
     /// Escape is Nullable
@@ -839,6 +1025,7 @@ void DefaultUdfLibrary::InitStringUdf() {
                 5. if one or more of target, pattern and escape are null values, then the result is null
 
                 Example:
+
                 @code{.sql}
                     select like_match('Mike', 'Mi_e', '\\')
                     -- output: true
@@ -882,6 +1069,7 @@ void DefaultUdfLibrary::InitStringUdf() {
                 5. if one or more of target, pattern then the result is null
 
                 Example:
+
                 @code{.sql}
                     select like_match('Mike', 'Mi_k')
                     -- output: true
@@ -920,6 +1108,7 @@ void DefaultUdfLibrary::InitStringUdf() {
 
 
                 Example:
+
                 @code{.sql}
                     select ilike_match('Mike', 'mi_e', '\\')
                     -- output: true
@@ -963,6 +1152,7 @@ void DefaultUdfLibrary::InitStringUdf() {
                 5. Return NULL if target or pattern is NULL
 
                 Example:
+
                 @code{.sql}
                     select ilike_match('Mike', 'Mi_k')
                     -- output: true
@@ -976,6 +1166,101 @@ void DefaultUdfLibrary::InitStringUdf() {
                 @param pattern: the glob match pattern
 
                 @since 0.4.0
+        )r");
+    RegisterExternal("regexp_like")
+        .args<StringRef, StringRef, StringRef>(reinterpret_cast<void*>(
+            static_cast<void (*)(StringRef*, StringRef*, StringRef*, bool*, bool*)>(
+                udf::v1::regexp_like)))
+        .return_by_arg(true)
+        .returns<Nullable<bool>>()
+        .doc(R"r(
+                @brief pattern match same as RLIKE predicate (based on RE2)
+
+                Rules:
+                1. Accept standard POSIX (egrep) syntax regular expressions
+                   - dot (.) : matches any single-width ASCII character in an expression, with the exception of line break characters.
+                   - asterisk (*) : matches the preceding token zero or more times.
+                   - plus sign (+) : matches the preceding token one or more times.
+                   - question mark (?) : identifies the preceding character as being optional.
+                   - vertical bar (|) : separates tokens, one of which must be matched, much like a logical OR statement.
+                   - parenthesis ('(' and ')') : groups multiple tokens together to disambiguate or simplify references to them.
+                   - open square bracket ([) and close square bracket (]) : enclose specific characters or a range of characters to be matched. The characters enclosed inside square brackets are known as a character class.
+                   - caret (^) : the caret has two different meanings in a regular expression, depending on where it appears:
+                     As the first character in a character class, a caret negates the characters in that character class.
+                     As the first character in a regular expression, a caret identifies the beginning of a term. In this context, the caret is often referred to as an anchor character.
+                   - dollar sign ($) : as the last character in a regular expression, a dollar sign identifies the end of a term. In this context, the dollar sign is often referred to as an anchor character.
+                   - backslash (\) : used to invoke the actual character value for a metacharacter in a regular expression.
+                2. Default flags parameter: 'c'
+                3. backslash: sql string literal use backslash(\) for escape sequences, write '\\' as backslash itself
+                4. if one or more of target, pattern and flags are null values, then the result is null
+
+                Example:
+
+                @code{.sql}
+                    select regexp_like('Mike', 'Mi.k')
+                    -- output: true
+
+                    select regexp_like('Mi\nke', 'mi.k')
+                    -- output: false
+
+                    select regexp_like('Mi\nke', 'mi.k', 'si')
+                    -- output: true
+
+                    select regexp_like('append', 'ap*end')
+                    -- output: true
+                @endcode
+
+                @param target: string to match
+
+                @param pattern: the regular expression match pattern
+
+                @param flags: specifies the matching behavior of the regular expression function. 'c': case-sensitive matching(default); 'i': case-insensitive matching; 'm': multi-line mode; 'e': Extracts sub-matches(ignored here); 's': Enables the POSIX wildcard character . to match new line.
+
+                @since 0.6.1
+        )r");
+    RegisterExternal("regexp_like")
+        .args<StringRef, StringRef>(reinterpret_cast<void*>(
+            static_cast<void (*)(StringRef*, StringRef*, bool*, bool*)>(
+                udf::v1::regexp_like)))
+        .return_by_arg(true)
+        .returns<Nullable<bool>>()
+        .doc(R"r(
+                @brief pattern match same as RLIKE predicate (based on RE2)
+
+                Rules:
+                1. Accept standard POSIX (egrep) syntax regular expressions
+                   - dot (.) : matches any single-width ASCII character in an expression, with the exception of line break characters.
+                   - asterisk (*) : matches the preceding token zero or more times.
+                   - plus sign (+) : matches the preceding token one or more times.
+                   - question mark (?) : identifies the preceding character as being optional.
+                   - vertical bar (|) : separates tokens, one of which must be matched, much like a logical OR statement.
+                   - parenthesis ('(' and ')') : groups multiple tokens together to disambiguate or simplify references to them.
+                   - open square bracket ([) and close square bracket (]) : enclose specific characters or a range of characters to be matched. The characters enclosed inside square brackets are known as a character class.
+                   - caret (^) : the caret has two different meanings in a regular expression, depending on where it appears:
+                     As the first character in a character class, a caret negates the characters in that character class.
+                     As the first character in a regular expression, a caret identifies the beginning of a term. In this context, the caret is often referred to as an anchor character.
+                   - dollar sign ($) : as the last character in a regular expression, a dollar sign identifies the end of a term. In this context, the dollar sign is often referred to as an anchor character.
+                   - backslash (\) : used to invoke the actual character value for a metacharacter in a regular expression.
+                2. case sensitive
+                3. backslash: sql string literal use backslash(\) for escape sequences, write '\\' as backslash itself
+                4. Return NULL if target or pattern is NULL
+
+                Example:
+
+                @code{.sql}
+                    select regexp_like('Mike', 'Mi.k')
+                    -- output: true
+
+                    select regexp_like('append', 'ap*end')
+                    -- output: true
+
+                @endcode
+
+                @param target: string to match
+
+                @param pattern: the regular expression match pattern
+
+                @since 0.6.1
         )r");
     RegisterExternal("ucase")
         .args<StringRef>(
@@ -1103,7 +1388,7 @@ void DefaultUdfLibrary::InitMathUdf() {
 
             @code{.sql}
 
-                SELECT LOG(1);  
+                SELECT LOG(1);
                 -- output 0.000000
 
                 SELECT LOG(10,100);
@@ -1151,7 +1436,7 @@ void DefaultUdfLibrary::InitMathUdf() {
 
             @code{.sql}
 
-                SELECT LN(1);  
+                SELECT LN(1);
                 -- output 0.000000
 
             @endcode
@@ -1181,7 +1466,7 @@ void DefaultUdfLibrary::InitMathUdf() {
 
             @code{.sql}
 
-                SELECT LOG2(65536);  
+                SELECT LOG2(65536);
                 -- output 16
 
             @endcode
@@ -1211,7 +1496,7 @@ void DefaultUdfLibrary::InitMathUdf() {
 
             @code{.sql}
 
-                SELECT LOG10(100);  
+                SELECT LOG10(100);
                 -- output 2
 
             @endcode
@@ -1302,7 +1587,7 @@ void DefaultUdfLibrary::InitMathUdf() {
 
             @code{.sql}
 
-                SELECT EXP(0);  
+                SELECT EXP(0);
                 -- output 1
 
             @endcode
@@ -1385,33 +1670,53 @@ void DefaultUdfLibrary::InitMathUdf() {
 
     RegisterExternalTemplate<v1::Round>("round")
         .doc(R"(
-            @brief Return the nearest integer value to expr (in floating-point format),
-            rounding halfway cases away from zero, regardless of the current rounding mode.
+            @brief Returns expr rounded to d decimal places using HALF_UP rounding mode.
+
+            @param numeric_expr Expression evaluated to numeric
+            @param d Integer decimal place, if omitted, default to 0
+
+            When `d` is a positive, `numeric_expr` is rounded to the number of decimal positions specified by `d`. When `d` is a negative , `numeric_expr` is rounded on the left side of the decimal point.
+            Return type is the same as the type first parameter.
 
             Example:
 
             @code{.sql}
+                SELECT round(1.23);
+                -- 1 (double type)
 
-                SELECT ROUND(1.23);
-                -- output 1
+                SELECT round(1.23, 1)
+                -- 1.2 (double type)
 
+                SELECT round(123, -1)
+                -- 120 (int32 type)
             @endcode
 
-            @param expr
-
             @since 0.1.0)")
-        .args_in<int64_t, double>();
-    RegisterExternalTemplate<v1::Round32>("round").args_in<int16_t, int32_t>();
-    RegisterExprUdf("round").args<AnyArg>(
-        [](UdfResolveContext* ctx, ExprNode* x) -> ExprNode* {
-            if (!x->GetOutputType()->IsArithmetic()) {
-                ctx->SetError("round do not support type " +
-                              x->GetOutputType()->GetName());
+        .args_in<int16_t, int32_t, int64_t, float, double>();
+
+    RegisterExprUdf("round")
+        .variadic_args<AnyArg>(
+        [](UdfResolveContext* ctx, ExprNode* x, absl::Span<ExprNode* const> other) -> ExprNode* {
+            if (!x->GetOutputType()->IsArithmetic() || x->GetOutputType()->IsBool()) {
+                ctx->SetError("round do not support first parameter of type " + x->GetOutputType()->GetName());
                 return nullptr;
             }
             auto nm = ctx->node_manager();
-            auto cast = nm->MakeCastNode(node::kDouble, x);
-            return nm->MakeFuncNode("round", {cast}, nullptr);
+            if (other.size() > 1) {
+                ctx->SetError("can't round with more than 2 parameters");
+                return nullptr;
+            }
+
+            node::ExprNode* decimal_place = nm->MakeConstNode(0);
+            if (!other.empty()) {
+                auto sec_param = other.front();
+                if (!sec_param->GetOutputType()->IsArithmetic()) {
+                    ctx->SetError("round do not support second parameter of type " +
+                                  sec_param->GetOutputType()->GetName());
+                }
+                decimal_place = nm->MakeCastNode(node::kInt32, other.front());
+            }
+            return nm->MakeFuncNode("round", {x, decimal_place}, nullptr);
         });
 
     RegisterExternalTemplate<v1::Sqrt>("sqrt")
@@ -1481,19 +1786,36 @@ void DefaultUdfLibrary::InitMathUdf() {
             @param expr
 
             @since 0.5.0)");
-    RegisterExternal("RADIANS")
-        .args<double>(
-            static_cast<double (*)(double)>(udf::v1::degree_to_radius))
+
+    RegisterExprUdfTemplate<container::RadiansDef>("radians")
         .doc(R"(
             @brief Returns the argument X, converted from degrees to radians. (Note that π radians equals 180 degrees.)
 
             Example:
 
             @code{.sql}
-                SELECT RADIANS(90);
+                SELECT RADIANS(90.0);
                 --output 1.570796326794896619231
             @endcode
-            @since 0.6.0)");
+
+            @since 0.6.0)")
+        .args_in<int16_t, int32_t, int64_t, float, double>();
+
+    RegisterExternalTemplate<v1::Hash64>("hash64")
+        .doc(R"(
+            @brief Returns a hash value of the arguments. It is not a cryptographic hash function and should not be used as such.
+
+            Example:
+
+            @code{.sql}
+                SELECT hash64(cast(90 as int));
+                --output -3754664774081171349
+            @endcode
+
+            @since 0.7.0)")
+        .args_in<bool, int16_t, int32_t, int64_t, float, double, StringRef, Timestamp, Date>();
+    RegisterAlias("farm_fingerprint", "hash64");
+
     InitTrigonometricUdf();
 }
 
@@ -1546,7 +1868,7 @@ void DefaultUdfLibrary::InitTrigonometricUdf() {
 
             @code{.sql}
 
-                SELECT ATAN(-0.0);  
+                SELECT ATAN(-0.0);
                 -- output -0.000000
 
                 SELECT ATAN(0, -0);
@@ -1650,7 +1972,7 @@ void DefaultUdfLibrary::InitTrigonometricUdf() {
 
             @code{.sql}
 
-                SELECT COT(1);  
+                SELECT COT(1);
                 -- output 0.6420926159343306
 
             @endcode
@@ -1719,20 +2041,10 @@ void DefaultUdfLibrary::InitLogicalUdf() {
     RegisterAlias("isnull", "is_null");
 
     RegisterExprUdf("if_null")
-        .args<AnyArg, AnyArg>([](UdfResolveContext* ctx, ExprNode* input,
-                                 ExprNode* default_val) {
-            if (!node::TypeEquals(input->GetOutputType(),
-                                  default_val->GetOutputType())) {
-                ctx->SetError(
-                    "Default value should take same type with input, expect " +
-                    input->GetOutputType()->GetName() + " but get " +
-                    default_val->GetOutputType()->GetName());
-            }
+        .args<AnyArg, AnyArg>([](UdfResolveContext* ctx, ExprNode* input, ExprNode* default_val) {
             auto nm = ctx->node_manager();
             auto is_null = nm->MakeUnaryExprNode(input, node::kFnOpIsNull);
-            return nm->MakeCondExpr(
-                is_null, default_val,
-                nm->MakeUnaryExprNode(input, node::kFnOpNonNull));
+            return nm->MakeCondExpr(is_null, default_val, nm->MakeUnaryExprNode(input, node::kFnOpNonNull));
         })
         .doc(R"(
             @brief If input is not null, return input value; else return default value.
@@ -1753,11 +2065,6 @@ void DefaultUdfLibrary::InitLogicalUdf() {
     RegisterAlias("nvl", "if_null");
     RegisterExprUdf("nvl2")
         .args<AnyArg, AnyArg, AnyArg>([](UdfResolveContext* ctx, ExprNode* expr1, ExprNode* expr2, ExprNode* expr3) {
-            if (!node::TypeEquals(expr2->GetOutputType(), expr3->GetOutputType())) {
-                ctx->SetError(absl::StrCat("expr3 should take same type with expr2, expect ",
-                                           expr2->GetOutputType()->GetName(), " but get ",
-                                           expr3->GetOutputType()->GetName()));
-            }
             auto nm = ctx->node_manager();
             return nm->MakeCondExpr(nm->MakeUnaryExprNode(expr1, node::kFnOpIsNull), expr3, expr2);
         })
@@ -1821,6 +2128,10 @@ void DefaultUdfLibrary::InitTypeUdf() {
         .doc(R"(
             @brief Cast string expression to int32
 
+            @param str Input string, refer int64 for supported format
+
+            Returns NULL if string is invalid or represented number out of range of output type.
+
             Example:
 
             @code{.sql}
@@ -1828,6 +2139,8 @@ void DefaultUdfLibrary::InitTypeUdf() {
                 -- output 12345
             @endcode
             @since 0.1.0)");
+    RegisterAlias("int", "int32");
+
     RegisterExternal("int64")
         .args<StringRef>(reinterpret_cast<void*>(
             static_cast<void (*)(StringRef*, int64_t*, bool*)>(
@@ -1837,6 +2150,17 @@ void DefaultUdfLibrary::InitTypeUdf() {
         .doc(R"(
             @brief Cast string expression to int64
 
+            @param str Input string
+
+            Returns NULL if string is invalid or represented number out of range of output type.
+
+            Valid string input can be represented as the regexp
+             ```
+             \s*(\+|-)?(0[xX])?[0-9a-fA-F]+\s*
+             ```
+            - string is parsed unsigned, use minus(`-`) or plus(`+`) indicate signs
+            - default base of interpreted integer value is 10, and 16 if string starts with `0x` or `0X`
+
             Example:
 
             @code{.sql}
@@ -1845,6 +2169,8 @@ void DefaultUdfLibrary::InitTypeUdf() {
             @endcode
             @since 0.1.0
         )");
+    RegisterAlias("bigint", "int64");
+
     RegisterExternal("int16")
         .args<StringRef>(reinterpret_cast<void*>(
             static_cast<void (*)(StringRef*, int16_t*, bool*)>(
@@ -1854,6 +2180,10 @@ void DefaultUdfLibrary::InitTypeUdf() {
         .doc(R"(
             @brief Cast string expression to int16
 
+            @param str Input string, refer int64 for supported format
+
+            Returns NULL if string is invalid or represented number out of range of output type.
+
             Example:
 
             @code{.sql}
@@ -1862,6 +2192,8 @@ void DefaultUdfLibrary::InitTypeUdf() {
             @endcode
             @since 0.1.0
         )");
+    RegisterAlias("smallint", "int16");
+
     RegisterExternal("bool")
         .args<StringRef>(reinterpret_cast<void*>(
             static_cast<void (*)(StringRef*, bool*, bool*)>(
@@ -1881,13 +2213,14 @@ void DefaultUdfLibrary::InitTypeUdf() {
         )");
 
     RegisterExternal("date")
-        .args<Timestamp>(reinterpret_cast<void*>(
-            static_cast<void (*)(Timestamp*, Date*, bool*)>(
-                v1::timestamp_to_date)))
-        .return_by_arg(true)
-        .returns<Nullable<Date>>()
+        .args<Timestamp>(v1::timestamp_to_date)
         .doc(R"(
-            @brief Cast timestamp or string expression to date
+            @brief Cast timestamp or string expression to date (date >= 1900-01-01)
+
+            Supported string style:
+              - yyyy-mm-dd
+              - yyyymmdd
+              - yyyy-mm-dd hh:mm:ss
 
             Example:
 
@@ -1899,18 +2232,10 @@ void DefaultUdfLibrary::InitTypeUdf() {
             @endcode
             @since 0.1.0)");
     RegisterExternal("date")
-        .args<StringRef>(reinterpret_cast<void*>(
-            static_cast<void (*)(StringRef*, Date*, bool*)>(
-                v1::string_to_date)))
-        .return_by_arg(true)
-        .returns<Nullable<Date>>();
+        .args<StringRef>(v1::string_to_date);
 
     RegisterExternal("timestamp")
-        .args<Date>(reinterpret_cast<void*>(
-            static_cast<void (*)(Date*, Timestamp*, bool*)>(
-                v1::date_to_timestamp)))
-        .return_by_arg(true)
-        .returns<Nullable<Timestamp>>()
+        .args<Date>(v1::date_to_timestamp)
         .doc(R"(
             @brief Cast int64, date or string expression to timestamp
 
@@ -1923,21 +2248,17 @@ void DefaultUdfLibrary::InitTypeUdf() {
 
             @code{.sql}
                 select timestamp(1590115420000);
-                -- output 2020-05-22 10:43:40
+                -- output 1590115420000
 
-                select date("2020-05-22");
-                -- output 2020-05-22 00:00:00
+                select timestamp("2020-05-22");
+                -- output 1590076800000
 
                 select timestamp("2020-05-22 10:43:40");
-                -- output 2020-05-22 10:43:40
+                -- output 1590115420000
             @endcode
             @since 0.1.0)");
     RegisterExternal("timestamp")
-        .args<StringRef>(reinterpret_cast<void*>(
-            static_cast<void (*)(StringRef*, Timestamp*, bool*)>(
-                v1::string_to_timestamp)))
-        .return_by_arg(true)
-        .returns<Nullable<Timestamp>>();
+        .args<StringRef>(v1::string_to_timestamp);
 }
 
 void DefaultUdfLibrary::InitTimeAndDateUdf() {
@@ -1948,6 +2269,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the year part of a timestamp or date
 
             Example:
+
             @code{.sql}
                 select year(timestamp(1590115420000));
                 -- output 2020
@@ -1956,18 +2278,15 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
         )");
 
     RegisterCodeGenUdf("year")
-        .args<Date>(
-            [](CodeGenContext* ctx, NativeValue date, NativeValue* out) {
-                codegen::DateIRBuilder date_ir_builder(ctx->GetModule());
-                ::llvm::Value* ret = nullptr;
-                Status status;
-                CHECK_TRUE(date_ir_builder.Year(ctx->GetCurrentBlock(),
-                                                date.GetRaw(), &ret, status),
-                           kCodegenError,
-                           "Fail to build udf year(date): ", status.str());
-                *out = NativeValue::Create(ret);
-                return status;
-            })
+        .args<Date>([](CodeGenContext* ctx, NativeValue date, const node::ExprAttrNode& return_info, NativeValue* out) {
+            codegen::DateIRBuilder date_ir_builder(ctx->GetModule());
+            ::llvm::Value* ret = nullptr;
+            Status status;
+            CHECK_TRUE(date_ir_builder.Year(ctx->GetCurrentBlock(), date.GetRaw(), &ret, status), kCodegenError,
+                       "Fail to build udf year(date): ", status.str());
+            *out = NativeValue::Create(ret);
+            return status;
+        })
         .returns<int32_t>();
 
     RegisterExternal("month")
@@ -1977,6 +2296,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the month part of a timestamp or date
 
             Example:
+
             @code{.sql}
                 select month(timestamp(1590115420000));
                 -- output 5
@@ -1986,7 +2306,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
 
     RegisterCodeGenUdf("month")
         .args<Date>(
-            [](CodeGenContext* ctx, NativeValue date, NativeValue* out) {
+            [](CodeGenContext* ctx, NativeValue date, const node::ExprAttrNode& ri, NativeValue* out) {
                 codegen::DateIRBuilder date_ir_builder(ctx->GetModule());
                 ::llvm::Value* ret = nullptr;
                 Status status;
@@ -2008,6 +2328,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             Note: This function equals the `day()` function.
 
             Example:
+
             @code{.sql}
                 select dayofmonth(timestamp(1590115420000));
                 -- output 22
@@ -2019,7 +2340,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
         )");
 
     RegisterCodeGenUdf("dayofmonth").args<Date>(
-            [](CodeGenContext* ctx, NativeValue date, NativeValue* out) {
+            [](CodeGenContext* ctx, NativeValue date, const node::ExprAttrNode& ri, NativeValue* out) {
                 codegen::DateIRBuilder date_ir_builder(ctx->GetModule());
                 ::llvm::Value* ret = nullptr;
                 Status status;
@@ -2044,6 +2365,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             Note: This function equals the `week()` function.
 
             Example:
+
             @code{.sql}
                 select dayofweek(timestamp(1590115420000));
                 -- output 6
@@ -2056,6 +2378,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the day of year for a timestamp or date. Returns 0 given an invalid date.
 
             Example:
+
             @code{.sql}
                 select dayofyear(timestamp(1590115420000));
                 -- output 143
@@ -2098,6 +2421,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the week of year for a timestamp or date.
 
             Example:
+
             @code{.sql}
                 select weekofyear(timestamp(1590115420000));
                 -- output 21
@@ -2114,6 +2438,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the last day of the month to which the date belongs to
 
             Example:
+
             @code{.sql}
                 select last_day(timestamp("2020-05-22 10:43:40"));
                 -- output 2020-05-31
@@ -2149,6 +2474,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return expression + 1
 
             Example:
+
             @code{.sql}
                 select inc(1);
                 -- output 2
@@ -2163,6 +2489,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the hour for a timestamp
 
             Example:
+
             @code{.sql}
                 select hour(timestamp(1590115420000));
                 -- output 10
@@ -2177,6 +2504,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the minute for a timestamp
 
             Example:
+
             @code{.sql}
                 select minute(timestamp(1590115420000));
                 -- output 43
@@ -2191,6 +2519,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return the second for a timestamp
 
             Example:
+
             @code{.sql}
                 select second(timestamp(1590115420000));
                 -- output 40
@@ -2203,6 +2532,7 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @brief Return value
 
             Example:
+
             @code{.sql}
                 select identity(1);
                 -- output 1
@@ -2226,17 +2556,53 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             @endcode
             @since 0.1.0)");
 
+    RegisterExprUdf("pmod")
+        .args<AnyArg, AnyArg>([](UdfResolveContext* ctx, ExprNode* x, ExprNode* y) {
+            // pmod: mod = x % y
+            // if mod >= 0, return mod
+            // else, return (mod + y) % y
+            auto nm = ctx->node_manager();
+            auto mod = nm->MakeBinaryExprNode(x, y, node::kFnOpMod);
+            auto cond = nm->MakeBinaryExprNode(mod, nm->MakeConstNode(0), node::kFnOpLt);
+            auto add = ctx->node_manager()->MakeBinaryExprNode(mod, y, node::kFnOpAdd);
+            auto pmod = ctx->node_manager()->MakeBinaryExprNode(add, y, node::kFnOpMod);
+            return nm->MakeCondExpr(cond, pmod, mod);
+        })
+        .doc(R"(
+            @brief Compute pmod of two arguments. If any param is NULL, output NULL. If divisor is 0, output NULL
+
+            @param dividend any numeric number or NULL
+            @param divisor any numeric number or NULL
+
+            Example:
+
+            @code{.sql}
+                select pmod(-10, 3);
+                -- output 2
+                select pmod(10, -3);
+                -- output 1
+                select pmod(10, 3);
+                -- output 1
+                select pmod(-10, 0);
+                -- output NULL
+                select pmod(-10, NULL);
+                -- output NULL
+                select pmod(NULL, 2);
+                -- output NULL
+            @endcode
+            @since 0.7.0)");
+
     RegisterCodeGenUdf("make_tuple")
         .variadic_args<>(
             /* infer */
             [](UdfResolveContext* ctx,
-               const std::vector<const ExprAttrNode*>& args,
+               const std::vector<ExprAttrNode>& args,
                ExprAttrNode* out) {
                 auto nm = ctx->node_manager();
                 auto tuple_type = nm->MakeTypeNode(node::kTuple);
                 for (auto attr : args) {
-                    tuple_type->generics_.push_back(attr->type());
-                    tuple_type->generics_nullable_.push_back(attr->nullable());
+                    tuple_type->generics_.push_back(attr.type());
+                    tuple_type->generics_nullable_.push_back(attr.nullable());
                 }
                 out->SetType(tuple_type);
                 out->SetNullable(false);
@@ -2244,26 +2610,99 @@ void DefaultUdfLibrary::InitTimeAndDateUdf() {
             },
             /* gen */
             [](CodeGenContext* ctx, const std::vector<NativeValue>& args,
-               NativeValue* out) {
+               const ExprAttrNode& return_info, NativeValue* out) {
                 *out = NativeValue::CreateTuple(args);
                 return Status::OK();
             });
-}
 
-void DefaultUdfLibrary::Init() {
-    udf::RegisterNativeUdfToModule(this);
-    InitLogicalUdf();
-    InitTimeAndDateUdf();
-    InitTypeUdf();
-    InitMathUdf();
-    InitStringUdf();
+    RegisterExternal("datediff")
+        .args<Date, Date>(static_cast<void (*)(Date*, Date*, int32_t*, bool*)>(v1::date_diff))
+        .doc(R"(
+            @brief days difference from date1 to date2
 
-    InitWindowFunctions();
-    InitUdaf();
-    InitFeatureZero();
+            Supported date string style:
+              - yyyy-mm-dd
+              - yyyymmdd
+              - yyyy-mm-dd HH:MM:SS
+              - yyyy-mm-ddTHH:MM:SS.fff+HH:MM (RFC3399 format)
 
-    AddExternalFunction("init_udfcontext.opaque",
-            reinterpret_cast<void*>(static_cast<void (*)(UDFContext* context)>(udf::v1::init_udfcontext)));
+            Dates from string are transformed into the same time zone (which is currently always UTC+8) before differentiation,
+            dates from date type by default is at UTC+8, you may see a +1/-1 difference if the two date string have different time zones.
+
+            Hint: since openmldb date type limits range from year 1900, to datadiff from/to a date before
+            1900, pass it as string.
+
+            Example:
+
+            @code{.sql}
+                select datediff("2021-05-10", "2021-05-01");
+                -- output 9
+                select datediff("2021-04-10", "2021-05-01");
+                -- output -21
+                select datediff(Date("2021-04-10"), Date("2021-05-01"));
+                -- output -21
+            @endcode
+            @since 0.7.0)");
+    RegisterExternal("datediff")
+        .args<StringRef, StringRef>(static_cast<void (*)(StringRef*, StringRef*, int32_t*, bool*)>(v1::date_diff));
+    RegisterExternal("datediff")
+        .args<StringRef, Date>(static_cast<void (*)(StringRef*, Date*, int32_t*, bool*)>(v1::date_diff));
+    RegisterExternal("datediff")
+        .args<Date, StringRef>(static_cast<void (*)(Date*, StringRef*, int32_t*, bool*)>(v1::date_diff));
+
+    RegisterExternal("unix_timestamp")
+        .args<Date>(reinterpret_cast<void*>(static_cast<void (*)(Date*, int64_t*, bool*)>(v1::date_to_unix_timestamp)))
+        .return_by_arg(true)
+        .returns<Nullable<int64_t>>()
+        .doc(R"(
+            @brief Cast date or string expression to unix_timestamp. If empty string or NULL is provided, return current timestamp
+
+            Supported string style:
+              - yyyy-mm-dd
+              - yyyymmdd
+              - yyyy-mm-dd hh:mm:ss
+
+            Example:
+
+            @code{.sql}
+                select unix_timestamp("2020-05-22");
+                -- output 1590076800
+
+                select unix_timestamp("2020-05-22 10:43:40");
+                -- output 1590115420
+
+                select unix_timestamp("");
+                -- output 1670404338 (the current timestamp)
+            @endcode
+            @since 0.7.0)");
+    RegisterExternal("unix_timestamp")
+        .args<StringRef>(
+            reinterpret_cast<void*>(static_cast<void (*)(StringRef*, int64_t*, bool*)>(v1::string_to_unix_timestamp)))
+        .return_by_arg(true)
+        .returns<Nullable<int64_t>>();
+
+    RegisterExternalTemplate<AddMonths>("add_months")
+        .doc(R"s(
+             @brief adds an integer months to a given date, returning the resulting date.
+
+             The resulting day component will remain the same as that specified in date, unless the resulting month has fewer days than the day component of the given date,
+             in which case the day will be the last day of the resulting month. Returns NULL if given an invalid date, or a NULL argument.
+
+             @param start_date Date value to add
+             @param num_months Integer value as number of months to add, can be positive or negative
+
+             @code{.sql}
+               SELECT add_months('2016-08-31', 1);
+               -- 2016-09-30
+               SELECT add_months('2016-08-31', -1);
+               -- 2016-07-31
+               SELECT add_months('2012-01-31', 1);
+               -- 2012-02-29
+             @endcode
+
+             @since 0.8.0
+             )s")
+        .args_in<int32_t, int16_t, int64_t>();
 }
 
 void DefaultUdfLibrary::InitUdaf() {
@@ -2434,6 +2873,34 @@ void DefaultUdfLibrary::InitUdaf() {
         .args_in<bool, int16_t, int32_t, int64_t, float, double, Timestamp,
                  Date, StringRef>();
 
+    RegisterUdafTemplate<EwAvgUdafDef>("ew_avg")
+        .doc(R"(
+            @brief Compute exponentially-weighted average of values.
+            It's equivalent to pandas ewm(alpha={alpha}, adjust=True, ignore_na=True, com=None, span=None, halflife=None, min_periods=0)
+
+            It requires that values are ordered so that it can only be used with WINDOW (PARTITION BY xx ORDER BY xx).
+            Undefined behaviour if it is used with GROUP BY and full table aggregation.
+
+            @param value  Specify value column to aggregate on.
+            @param alpha  Specify smoothing factor alpha (0 <= alpha <= 1). If NULL or 0, fall back to normal `avg`
+
+            Example:
+
+            |value|
+            |--|
+            |0|
+            |1|
+            |2|
+            |3|
+            |4|
+            @code{.sql}
+                SELECT ew_avg(value, 0.5) OVER w;
+                -- output 3.161290
+            @endcode
+            @since 0.7.2
+        )")
+        .args_in<int16_t, int32_t, int64_t, float, double>();
+
     RegisterUdafTemplate<SumWhereDef>("sum_where")
         .doc(R"(
             @brief Compute sum of values match specified condition
@@ -2480,7 +2947,7 @@ void DefaultUdfLibrary::InitUdaf() {
             @endcode
             @since 0.1.0
         )")
-        .args_in<int16_t, int32_t, int64_t, float, double, Timestamp, Date,
+        .args_in<bool, int16_t, int32_t, int64_t, float, double, Timestamp, Date,
                  StringRef, LiteralTypedRow<>>();
 
     RegisterUdafTemplate<AvgWhereDef>("avg_where")
@@ -2568,14 +3035,14 @@ void DefaultUdfLibrary::InitUdaf() {
 
             |value|
             |--|
-            |0|
             |1|
             |2|
             |3|
             |4|
+            |4|
             @code{.sql}
                 SELECT top(value, 3) OVER w;
-                -- output "2,3,4"
+                -- output "4,4,3"
             @endcode
             @since 0.1.0
         )")
@@ -2589,7 +3056,7 @@ void DefaultUdfLibrary::InitUdaf() {
             @param value  Specify value column to aggregate on.
 
             Example:
-            
+
             |value|
             |--|
             |1|
@@ -2604,8 +3071,40 @@ void DefaultUdfLibrary::InitUdaf() {
         )")
         .args_in<int16_t, int32_t, int64_t, float, double>();
 
+    RegisterUdafTemplate<DrawdownUdafDef>("drawdown")
+        .doc(R"(
+            @brief Compute drawdown of values.
+
+            Drawdown is defined as the max decline percentage from a historical peak to a subsequent valley.
+            It is commonly used as an indicator of risk in quant-trading to measure the max loss.
+
+            It requires that values are ordered so that it can only be used with WINDOW (PARTITION BY xx ORDER BY xx).
+            GROUP BY and full table aggregation are not supported.
+
+            @param value  Specify value column to aggregate on.
+
+            It requires that all values are non-negative. Negative values will be ignored.
+
+            Example:
+
+            |value|
+            |--|
+            |1|
+            |8|
+            |5|
+            |2|
+            |10|
+            |4|
+            @code{.sql}
+                SELECT drawdown(value) OVER w;
+                -- output 0.75 (decline from 8 to 2)
+            @endcode
+            @since 0.7.2
+        )")
+        .args_in<int16_t, int32_t, int64_t, float, double>();
 
     InitAggByCateUdafs();
+    InitStatisticsUdafs();
 }
 
 }  // namespace udf

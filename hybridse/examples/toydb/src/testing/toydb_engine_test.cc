@@ -15,7 +15,7 @@
  */
 
 #include "gtest/gtest.h"
-#include "gtest/internal/gtest-param-util.h"
+#include "vm/engine.h"
 #include "testing/toydb_engine_test_base.h"
 
 using namespace llvm;       // NOLINT (build/namespaces)
@@ -24,7 +24,7 @@ using namespace llvm::orc;  // NOLINT (build/namespaces)
 namespace hybridse {
 namespace vm {
 TEST_P(EngineTest, TestRequestEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     EngineOptions options;
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
     if (!boost::contains(sql_case.mode(), "request-unsupport") &&
@@ -36,7 +36,7 @@ TEST_P(EngineTest, TestRequestEngine) {
     }
 }
 TEST_P(EngineTest, TestBatchEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     EngineOptions options;
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
     if (!boost::contains(sql_case.mode(), "batch-unsupport") &&
@@ -49,7 +49,7 @@ TEST_P(EngineTest, TestBatchEngine) {
     }
 }
 TEST_P(EngineTest, TestBatchRequestEngineForLastRow) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     EngineOptions options;
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
     if (!boost::contains(sql_case.mode(), "request-unsupport") &&
@@ -62,7 +62,7 @@ TEST_P(EngineTest, TestBatchRequestEngineForLastRow) {
     }
 }
 TEST_P(EngineTest, TestClusterRequestEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     EngineOptions options;
     options.SetClusterOptimized(true);
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
@@ -76,7 +76,7 @@ TEST_P(EngineTest, TestClusterRequestEngine) {
     }
 }
 TEST_P(EngineTest, TestClusterBatchRequestEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     EngineOptions options;
     options.SetClusterOptimized(true);
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
@@ -91,8 +91,15 @@ TEST_P(EngineTest, TestClusterBatchRequestEngine) {
     }
 }
 
+// ====================================================== /
+// BatchRequestEngineTest
+//   test batch request mode only, with yaml:
+//   - case/function/test_batch_request.yaml
+//
+// TODO(ace): merge to EngineTest above simply
+// ====================================================== /
 TEST_P(BatchRequestEngineTest, TestBatchRequestEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
     EngineOptions options;
     options.SetClusterOptimized(false);
@@ -103,7 +110,7 @@ TEST_P(BatchRequestEngineTest, TestBatchRequestEngine) {
     }
 }
 TEST_P(BatchRequestEngineTest, TestClusterBatchRequestEngine) {
-    ParamType sql_case = GetParam();
+    auto& sql_case = GetParam();
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
     EngineOptions options;
     options.SetClusterOptimized(true);
@@ -119,8 +126,7 @@ TEST_P(BatchRequestEngineTest, TestClusterBatchRequestEngine) {
 }  // namespace hybridse
 
 int main(int argc, char** argv) {
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
+    ::hybridse::vm::Engine::InitializeGlobalLLVM();
     ::testing::InitGoogleTest(&argc, argv);
     // ::hybridse::vm::CoreAPI::EnableSignalTraceback();
     return RUN_ALL_TESTS();

@@ -17,9 +17,9 @@
 #ifndef HYBRIDSE_INCLUDE_NODE_NODE_BASE_H_
 #define HYBRIDSE_INCLUDE_NODE_NODE_BASE_H_
 
-#include <glog/logging.h>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "base/fe_object.h"
 #include "node/node_enum.h"
@@ -80,12 +80,25 @@ class NodeBase : public base::FeBaseObject {
 
     virtual T* DeepCopy(NodeManager*) const { return nullptr; }
 
-    virtual bool UpdateChild(size_t idx, T* new_child) { return false; }
-
     size_t node_id() const { return node_id_; }
 
  protected:
     NodeBase<T>() = default;
+
+    template <typename Derived, typename Pred>
+    bool EqualsOverride(const T* other, Pred&& pred) const {
+        auto lhs = dynamic_cast<const Derived*>(this);
+        if (lhs == nullptr) {
+            return false;
+        }
+
+        if (!lhs->T::Equals(other)) {
+            return false;
+        }
+
+        auto rhs = dynamic_cast<const Derived*>(other);
+        return lhs != nullptr && rhs != nullptr && std::forward<Pred>(pred)(lhs, rhs);
+    }
 
  private:
     friend class NodeManager;

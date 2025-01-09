@@ -21,22 +21,20 @@
 #include <utility>
 #include <vector>
 
-#include "glog/logging.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
 
 namespace hybridse {
 namespace codegen {
 
-class CodeGenContext;
+class CodeGenContextBase;
 
 class NativeValue {
  public:
     ::llvm::Value* GetIsNull(::llvm::IRBuilder<>*) const;
-    ::llvm::Value* GetIsNull(CodeGenContext*) const;
+    ::llvm::Value* GetIsNull(CodeGenContextBase*) const;
 
     ::llvm::Value* GetValue(::llvm::IRBuilder<>*) const;
-    ::llvm::Value* GetValue(CodeGenContext*) const;
+    ::llvm::Value* GetValue(CodeGenContextBase*) const;
 
     ::llvm::Value* GetAddr(::llvm::IRBuilder<>*) const;
 
@@ -93,9 +91,9 @@ class NativeValue {
     NativeValue WithFlag(::llvm::Value*) const;
 
     NativeValue() : raw_(nullptr), flag_(nullptr), type_(nullptr) {}
+    NativeValue(::llvm::Value* raw, ::llvm::Value* flag, ::llvm::Type* type);
 
  private:
-    NativeValue(::llvm::Value* raw, ::llvm::Value* flag, ::llvm::Type* type);
     ::llvm::Value* raw_;
     ::llvm::Value* flag_;
     ::llvm::Type* type_;

@@ -29,20 +29,119 @@
 #include "codec/fe_row_codec.h"
 #include "node/sql_node.h"
 #include "proto/name_server.pb.h"
+#include "schema/schema_adapter.h"
 #include "sdk/base.h"
 
 namespace openmldb::sdk {
 
 typedef std::shared_ptr<std::map<uint32_t, std::shared_ptr<::hybridse::node::ConstNode>>> DefaultValueMap;
 
+// used in java to build InsertPreparedStatementCache
+class DefaultValueContainer {
+ public:
+    explicit DefaultValueContainer(const DefaultValueMap& default_map) : default_map_(default_map) {}
+
+    std::vector<uint32_t> GetAllPosition() {
+        std::vector<uint32_t> vec;
+        for (const auto& kv : *default_map_) {
+            vec.push_back(kv.first);
+        }
+        return vec;
+    }
+
+    bool IsValid(int idx) {
+        return idx >= 0 && idx < Size();
+    }
+
+    int Size() {
+        return default_map_->size();
+    }
+
+    bool IsNull(int idx) {
+        return default_map_->at(idx)->IsNull();
+    }
+
+    bool GetBool(int idx) {
+        return default_map_->at(idx)->GetBool();
+    }
+
+    int16_t GetSmallInt(int idx) {
+        return default_map_->at(idx)->GetSmallInt();
+    }
+
+    int32_t GetInt(int idx) {
+        return default_map_->at(idx)->GetInt();
+    }
+
+    int64_t GetBigInt(int idx) {
+        return default_map_->at(idx)->GetLong();
+    }
+
+    float GetFloat(int idx) {
+        return default_map_->at(idx)->GetFloat();
+    }
+
+    double GetDouble(int idx) {
+        return default_map_->at(idx)->GetDouble();
+    }
+
+    int32_t GetDate(int idx) {
+        return default_map_->at(idx)->GetInt();
+    }
+
+    int64_t GetTimeStamp(int idx) {
+        return default_map_->at(idx)->GetLong();
+    }
+
+    std::string GetString(int idx) {
+        return default_map_->at(idx)->GetStr();
+    }
+
+ private:
+    DefaultValueMap default_map_;
+};
+
 class SQLInsertRow {
  public:
+    // for raw insert sql(no hole)
     SQLInsertRow(std::shared_ptr<::openmldb::nameserver::TableInfo> table_info,
                  std::shared_ptr<hybridse::sdk::Schema> schema, DefaultValueMap default_map,
-                 uint32_t default_str_length);
+                 uint32_t default_str_length, bool put_if_absent);
     SQLInsertRow(std::shared_ptr<::openmldb::nameserver::TableInfo> table_info,
                  std::shared_ptr<hybridse::sdk::Schema> schema, DefaultValueMap default_map,
-                 uint32_t default_str_length, std::vector<uint32_t> hole_idx_arr);
+                 uint32_t default_str_length, std::vector<uint32_t> hole_idx_arr, bool put_if_absent);
+    SQLInsertRow(std::shared_ptr<::openmldb::nameserver::TableInfo> table_info,
+                 std::shared_ptr<hybridse::sdk::Schema> schema, std::shared_ptr<int8_t> codegen_row, bool put_if_absent)
+        : table_info_(table_info),
+          schema_(schema),
+          rb_(table_info->column_desc()),
+          put_if_absent_(put_if_absent),
+          is_codegen_row_(true) {
+        auto size = hybridse::codec::RowView::GetSize(codegen_row.get());
+        val_ = std::string(reinterpret_cast<char*>(codegen_row.get()), size);
+        std::map<std::string, uint32_t> column_name_map;
+        for (int idx = 0; idx < table_info_->column_desc_size(); idx++) {
+            column_name_map.emplace(table_info_->column_desc(idx).name(), idx);
+        }
+        if (table_info_->column_key_size() > 0) {
+            index_map_.clear();
+            raw_dimensions_.clear();
+            for (int idx = 0; idx < table_info_->column_key_size(); ++idx) {
+                const auto& index = table_info_->column_key(idx);
+                if (index.flag()) {
+                    continue;
+                }
+                for (const auto& column : index.col_name()) {
+                    index_map_[idx].push_back(column_name_map[column]);
+                    raw_dimensions_[column_name_map[column]] = hybridse::codec::NONETOKEN;
+                }
+                if (!index.ts_name().empty()) {
+                    ts_set_.insert(column_name_map[index.ts_name()]);
+                }
+            }
+        }
+    }
+
     ~SQLInsertRow() = default;
     bool Init(int str_length);
     bool AppendBool(bool val);
@@ -81,10 +180,23 @@ class SQLInsertRow {
                                                const std::vector<uint32_t>& stmt_column_idx_in_table,
                                                const std::shared_ptr<::hybridse::sdk::Schema>& schema);
 
+    std::shared_ptr<DefaultValueContainer> GetDefaultValue() {
+        return std::make_shared<DefaultValueContainer>(default_map_);
+    }
+
+    ::openmldb::nameserver::TableInfo GetTableInfo() {
+        return *table_info_;
+    }
+
+    bool IsPutIfAbsent() const {
+        return put_if_absent_;
+    }
+
  private:
     bool MakeDefault();
     void PackDimension(const std::string& val);
     inline bool IsDimension() { return raw_dimensions_.find(rb_.GetAppendPos()) != raw_dimensions_.end(); }
+    inline bool IsTsCol() { return ts_set_.find(rb_.GetAppendPos()) != ts_set_.end(); }
 
  private:
     std::shared_ptr<::openmldb::nameserver::TableInfo> table_info_;
@@ -100,13 +212,16 @@ class SQLInsertRow {
     ::openmldb::codec::RowBuilder rb_;
     std::string val_;
     uint32_t str_size_;
+    bool put_if_absent_;
+
+    bool is_codegen_row_ = false;
 };
 
 class SQLInsertRows {
  public:
     SQLInsertRows(std::shared_ptr<::openmldb::nameserver::TableInfo> table_info,
                   std::shared_ptr<hybridse::sdk::Schema> schema, DefaultValueMap default_map, uint32_t str_size,
-                  const std::vector<uint32_t>& hole_idx_arr);
+                  const std::vector<uint32_t>& hole_idx_arr, bool put_if_absent);
     ~SQLInsertRows() = default;
     std::shared_ptr<SQLInsertRow> NewRow();
     inline uint32_t GetCnt() { return rows_.size(); }
@@ -125,6 +240,7 @@ class SQLInsertRows {
     DefaultValueMap default_map_;
     uint32_t default_str_length_;
     std::vector<uint32_t> hole_idx_arr_;
+    bool put_if_absent_;
 
     std::vector<std::shared_ptr<SQLInsertRow>> rows_;
 };

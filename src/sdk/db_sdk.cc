@@ -45,7 +45,12 @@ std::shared_ptr<::openmldb::client::NsClient> DBSDK::GetNsClient() {
         DLOG(ERROR) << "fail to get ns address";
         return {};
     }
-    ns_client = std::make_shared<::openmldb::client::NsClient>(endpoint, real_endpoint);
+    if (auto options = GetOptions(); !options->user.empty()) {
+        ns_client = std::make_shared<::openmldb::client::NsClient>(
+            endpoint, real_endpoint, authn::UserToken{options->user, codec::Encrypt(options->password)});
+    } else {
+        ns_client = std::make_shared<::openmldb::client::NsClient>(endpoint, real_endpoint);
+    }
     int ret = ns_client->Init();
     if (ret != 0) {
         // We GetNsClient and use it without checking not null. It's intolerable.
@@ -142,7 +147,10 @@ bool DBSDK::RegisterExternalFun(const std::shared_ptr<openmldb::common::External
         ::openmldb::schema::SchemaAdapter::ConvertType(fun->arg_type(i), &data_type);
         arg_types.emplace_back(data_type);
     }
-    if (engine_->RegisterExternalFunction(fun->name(), return_type, arg_types, fun->is_aggregate(), "").isOK()) {
+    if (engine_
+            ->RegisterExternalFunction(fun->name(), return_type, fun->return_nullable(), arg_types, fun->arg_nullable(),
+                                       fun->is_aggregate(), "")
+            .isOK()) {
         std::lock_guard<::openmldb::base::SpinMutex> lock(mu_);
         external_fun_.emplace(fun->name(), fun);
         return true;
@@ -172,17 +180,25 @@ bool DBSDK::RemoveExternalFun(const std::string& name) {
     return true;
 }
 
-ClusterSDK::ClusterSDK(const ClusterOptions& options)
+ClusterSDK::ClusterSDK(const std::shared_ptr<SQLRouterOptions>& options)
     : options_(options),
       session_id_(0),
-      table_root_path_(options.zk_path + "/table/db_table_data"),
-      sp_root_path_(options.zk_path + "/store_procedure/db_sp_data"),
-      notify_path_(options.zk_path + "/table/notify"),
-      globalvar_changed_notify_path_(options.zk_path + "/notify/global_variable"),
-      leader_path_(options.zk_path + "/leader"),
-      taskmanager_leader_path_(options.zk_path + "/taskmanager/leader"),
+      table_root_path_(options->zk_path + "/table/db_table_data"),
+      sp_root_path_(options->zk_path + "/store_procedure/db_sp_data"),
+      notify_path_(options->zk_path + "/table/notify"),
+      globalvar_changed_notify_path_(options->zk_path + "/notify/global_variable"),
+      leader_path_(options->zk_path + "/leader"),
+      taskmanager_leader_path_(options->zk_path + "/taskmanager/leader"),
       zk_client_(nullptr),
-      pool_(1) {}
+      pool_(1) {
+    if (!options->user.empty()) {
+        client_manager_ = std::make_shared<::openmldb::catalog::ClientManager>(
+            authn::UserToken{options->user, codec::Encrypt(options->password)});
+    } else {
+        client_manager_ = std::make_shared<::openmldb::catalog::ClientManager>();
+    }
+    catalog_ = std::make_shared<catalog::SDKCatalog>(client_manager_);
+}
 
 ClusterSDK::~ClusterSDK() {
     pool_.Stop(false);
@@ -194,26 +210,32 @@ ClusterSDK::~ClusterSDK() {
 }
 
 void ClusterSDK::CheckZk() {
-    if (session_id_ == 0) {
-        WatchNotify();
-    } else if (session_id_ != zk_client_->GetSessionTerm()) {
-        LOG(WARNING) << "session changed, re-watch notify";
-        WatchNotify();
+    // ensure that zk client is alive
+    if (zk_client_->EnsureConnected()) {
+        if (session_id_ == 0) {
+            WatchNotify();
+        } else if (session_id_ != zk_client_->GetSessionTerm()) {
+            LOG(WARNING) << "session changed, re-watch notify";
+            WatchNotify();
+        }
+    } else {
+        // 5min print once
+        LOG_EVERY_N(WARNING, 150) << "zk client is not connected, reconnect later";
     }
+
     pool_.DelayTask(2000, [this] { CheckZk(); });
 }
 
 bool ClusterSDK::Init() {
-    zk_client_ = new ::openmldb::zk::ZkClient(options_.zk_cluster, "",
-                                              options_.zk_session_timeout, "",
-                                              options_.zk_path);
+    zk_client_ = new ::openmldb::zk::ZkClient(options_->zk_cluster, "", options_->zk_session_timeout, "",
+                                              options_->zk_path, options_->zk_auth_schema, options_->zk_cert);
 
-    bool ok = zk_client_->Init(options_.zk_log_level, options_.zk_log_file);
+    bool ok = zk_client_->Init(options_->zk_log_level, options_->zk_log_file);
     if (!ok) {
-        LOG(WARNING) << "fail to init zk client with " << options_.to_string();
+        LOG(WARNING) << "fail to init zk client with " << options_->to_string();
         return false;
     }
-    LOG(INFO) << "init zk client with " << options_.to_string() << " and session id " << zk_client_->GetSessionTerm();
+    LOG(INFO) << "init zk client with " << options_->to_string() << " and session id " << zk_client_->GetSessionTerm();
 
     ::hybridse::vm::EngineOptions eopt;
     eopt.SetCompileOnly(true);
@@ -234,7 +256,7 @@ void ClusterSDK::WatchNotify() {
     session_id_ = zk_client_->GetSessionTerm();
     zk_client_->CancelWatchItem(notify_path_);
     zk_client_->WatchItem(notify_path_, [this] { Refresh(); });
-    zk_client_->WatchChildren(options_.zk_path + "/data/function",
+    zk_client_->WatchChildren(options_->zk_path + "/data/function",
                               [this](auto&& PH1) { RefreshExternalFun(std::forward<decltype(PH1)>(PH1)); });
 
     zk_client_->WatchChildren(leader_path_, [this](auto&& PH1) { RefreshNsClient(std::forward<decltype(PH1)>(PH1)); });
@@ -317,9 +339,6 @@ bool ClusterSDK::UpdateCatalog(const std::vector<std::string>& table_datas, cons
             continue;
         }
         DLOG(INFO) << "parse table " << table_info->name() << " ok";
-        if (table_info->format_version() != 1) {
-            continue;
-        }
         tables.push_back(*(table_info));
         auto it = mapping.find(table_info->db());
         if (it == mapping.end()) {
@@ -383,7 +402,7 @@ bool ClusterSDK::InitTabletClient() {
     std::vector<std::string> tablets;
     bool ok = zk_client_->GetNodes(tablets);
     if (!ok) {
-        LOG(WARNING) << "fail to get tablet";
+        LOG(WARNING) << "fail to get tablets from zk";
         return false;
     }
     std::map<std::string, std::string> real_ep_map;
@@ -423,9 +442,21 @@ bool ClusterSDK::BuildCatalog() {
             return false;
         }
     } else {
-        DLOG(INFO) << "no procedures in db";
+        LOG(INFO) << "no procedures in db";
     }
+    // The empty database can't be find if we only get table datas, but database no notify, so we get alldbs from
+    // nameserver in GetAllDbs()
     return UpdateCatalog(table_datas, sp_datas);
+}
+
+std::vector<std::string> DBSDK::GetAllDbs() {
+    std::vector<std::string> all_dbs;
+    std::string st;
+    if (!GetNsClient()->ShowDatabase(&all_dbs, st)) {
+        LOG(WARNING) << "show db from ns failed, msg: " << st;
+        return {};
+    }
+    return all_dbs;
 }
 
 uint32_t DBSDK::GetTableId(const std::string& db, const std::string& tname) {
@@ -493,7 +524,7 @@ bool ClusterSDK::GetRealEndpointFromZk(const std::string& endpoint, std::string*
     if (real_endpoint == nullptr) {
         return false;
     }
-    std::string sdk_path = options_.zk_path + "/map/sdkendpoints/" + endpoint;
+    std::string sdk_path = options_->zk_path + "/map/sdkendpoints/" + endpoint;
     if (zk_client_->IsExistNode(sdk_path) == 0) {
         if (!zk_client_->GetNodeValue(sdk_path, *real_endpoint)) {
             DLOG(WARNING) << "get zk failed! : sdk_path: " << sdk_path;
@@ -501,7 +532,7 @@ bool ClusterSDK::GetRealEndpointFromZk(const std::string& endpoint, std::string*
         }
     }
     if (real_endpoint->empty()) {
-        std::string sname_path = options_.zk_path + "/map/names/" + endpoint;
+        std::string sname_path = options_->zk_path + "/map/names/" + endpoint;
         if (zk_client_->IsExistNode(sname_path) == 0) {
             if (!zk_client_->GetNodeValue(sname_path, *real_endpoint)) {
                 DLOG(WARNING) << "get zk failed! : sname_path: " << sname_path;
@@ -558,6 +589,19 @@ std::shared_ptr<::openmldb::catalog::TabletAccessor> DBSDK::GetTablet(const std:
     return {};
 }
 
+std::vector<std::shared_ptr<::openmldb::catalog::TabletAccessor>> DBSDK::GetTabletFollowers(const std::string& db,
+                                                                                            const std::string& name,
+                                                                                            uint32_t pid) {
+    auto table_handler = GetCatalog()->GetTable(db, name);
+    if (table_handler) {
+        auto* sdk_table_handler = dynamic_cast<::openmldb::catalog::SDKTableHandler*>(table_handler.get());
+        if (sdk_table_handler) {
+            return sdk_table_handler->GetTabletFollowers(pid);
+        }
+    }
+    return {};
+}
+
 std::shared_ptr<::openmldb::catalog::TabletAccessor> DBSDK::GetTablet(const std::string& db, const std::string& name,
                                                                       const std::string& pk) {
     auto table_handler = GetCatalog()->GetTable(db, name);
@@ -597,7 +641,7 @@ std::shared_ptr<hybridse::sdk::ProcedureInfo> DBSDK::GetProcedureInfo(const std:
 std::vector<std::shared_ptr<hybridse::sdk::ProcedureInfo>> DBSDK::GetProcedureInfo(std::string* msg) {
     std::vector<std::shared_ptr<hybridse::sdk::ProcedureInfo>> sp_infos;
     if (msg == nullptr) {
-        return std::move(sp_infos);
+        return sp_infos;
     }
     std::lock_guard<::openmldb::base::SpinMutex> lock(mu_);
     auto& db_sp_map = catalog_->GetProcedures();
@@ -608,9 +652,9 @@ std::vector<std::shared_ptr<hybridse::sdk::ProcedureInfo>> DBSDK::GetProcedureIn
     }
     if (sp_infos.empty()) {
         *msg = "procedure set is empty";
-        return std::move(sp_infos);
+        return sp_infos;
     }
-    return std::move(sp_infos);
+    return sp_infos;
 }
 
 bool StandAloneSDK::Init() {

@@ -15,19 +15,19 @@
  */
 
 #include "codegen/udf_ir_builder.h"
-#include <iostream>
-#include <utility>
+
+#include <memory>
+#include <string>
 #include <vector>
+
 #include "codegen/context.h"
-#include "codegen/date_ir_builder.h"
 #include "codegen/fn_ir_builder.h"
+#include "codegen/ir_base_builder.h"
 #include "codegen/list_ir_builder.h"
 #include "codegen/null_ir_builder.h"
-#include "codegen/timestamp_ir_builder.h"
+#include "codegen/type_ir_builder.h"
 #include "llvm/IR/Attributes.h"
-#include "node/node_manager.h"
 #include "node/sql_node.h"
-#include "udf/udf.h"
 #include "udf/udf_registry.h"
 
 using ::hybridse::common::kCodegenError;
@@ -76,6 +76,10 @@ Status UdfIRBuilder::BuildCall(
         case node::kLambdaDef: {
             auto node = dynamic_cast<const node::LambdaNode*>(fn);
             return BuildLambdaCall(node, args, output);
+        }
+        case node::kVariadicUdfDef: {
+            auto node = dynamic_cast<const node::VariadicUdfDefNode*>(fn);
+            return BuildVariadicUdfCall(node, arg_types, args, output);
         }
         default:
             return Status(common::kCodegenError, "Unknown function def type");
@@ -162,7 +166,7 @@ Status UdfIRBuilder::BuildLambdaCall(
 Status UdfIRBuilder::BuildCodeGenUdfCall(
     const node::UdfByCodeGenDefNode* fn,
     const std::vector<NativeValue>& args, NativeValue* output) {
-    auto gen_impl = fn->GetGenImpl();
+    std::shared_ptr<udf::LlvmUdfGenBase> gen_impl = fn->GetGenImpl();
 
     ::llvm::Value* ret_null = nullptr;
     for (size_t i = 0; i < fn->GetArgSize(); ++i) {
@@ -174,7 +178,7 @@ Status UdfIRBuilder::BuildCodeGenUdfCall(
     }
 
     NativeValue gen_output;
-    CHECK_STATUS(gen_impl->gen(ctx_, args, &gen_output));
+    CHECK_STATUS(gen_impl->gen(ctx_, args, {fn->GetReturnType(), fn->IsReturnNullable()}, &gen_output));
 
     if (ret_null != nullptr) {
         if (gen_output.IsNullable()) {
@@ -294,12 +298,14 @@ Status UdfIRBuilder::ExpandLlvmCallReturnArgs(
                 "udf_opaque_type_return_addr",
                 builder->getInt64(opaque_ret_type->bytes()));
         } else if (TypeIRBuilder::IsStructPtr(llvm_ty)) {
+            // Timestamp, Date, String, Array, etc will be struct ptr
             ret_alloca = CreateAllocaAtHead(
                 builder,
                 reinterpret_cast<llvm::PointerType*>(llvm_ty)->getElementType(),
                 "udf_struct_type_return_addr");
             // fill empty content for string
             if (dtype->base() == node::kVarchar) {
+                // empty string
                 builder->CreateStore(builder->getInt32(0),
                                      builder->CreateStructGEP(ret_alloca, 0));
                 builder->CreateStore(builder->CreateGlobalStringPtr(""),
@@ -742,6 +748,48 @@ Status UdfIRBuilder::BuildUdafCall(
         CHECK_STATUS(iter_delete_builder.BuildIteratorDelete(
             iterators[i], elem_types[i], &delete_iter_res));
     }
+    *output = local_output;
+    return Status::OK();
+}
+
+Status UdfIRBuilder::BuildVariadicUdfCall(const node::VariadicUdfDefNode* fn,
+                                          const std::vector<const node::TypeNode*>& arg_types,
+                                          const std::vector<NativeValue>& args,
+                                          NativeValue* output) {
+    CHECK_TRUE(arg_types.size() == args.size(), kCodegenError);
+    CHECK_TRUE(fn->GetArgSize() == args.size(), kCodegenError);
+    NativeValue cur_state_value;
+    std::vector<const node::TypeNode*> init_arg_types;
+    std::vector<NativeValue> init_args;
+    for (size_t i = 0; i < fn->init_func()->GetArgSize(); ++i) {
+        CHECK_TRUE(i <= args.size(), kCodegenError);
+        init_arg_types.push_back(arg_types[i]);
+        init_args.push_back(args[i]);
+    }
+    UdfIRBuilder sub_udf_builder_init(ctx_, frame_arg_, frame_);
+    CHECK_STATUS(sub_udf_builder_init.BuildCall(fn->init_func(),
+          init_arg_types, init_args, &cur_state_value));
+
+    const node::TypeNode* cur_state_value_type = fn->init_func()->GetReturnType();
+    for (size_t i = 0; i < fn->update_func().size(); ++i) {
+        std::vector<const node::TypeNode*> update_arg_types = {
+            cur_state_value_type, arg_types[fn->init_func()->GetArgSize() + i]
+        };
+        std::vector<NativeValue> update_args = {
+            cur_state_value, args[fn->init_func()->GetArgSize() + i]
+        };
+        UdfIRBuilder sub_udf_builder_update(ctx_, frame_arg_, frame_);
+        CHECK_STATUS(sub_udf_builder_update.BuildCall(fn->update_func()[i],
+            update_arg_types, update_args, &cur_state_value));
+        cur_state_value_type = fn->update_func()[i]->GetReturnType();
+    }
+
+    NativeValue local_output;
+    std::vector<const node::TypeNode*> output_arg_types = {cur_state_value_type};
+    std::vector<NativeValue> output_args = {cur_state_value};
+    UdfIRBuilder sub_udf_builder_output(ctx_, frame_arg_, frame_);
+    CHECK_STATUS(sub_udf_builder_output.BuildCall(fn->output_func(),
+        output_arg_types, output_args, &local_output));
     *output = local_output;
     return Status::OK();
 }

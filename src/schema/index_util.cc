@@ -18,6 +18,7 @@
 #include <map>
 #include <string>
 #include <set>
+#include <utility>
 #include "common/timer.h"
 #include "gflags/gflags.h"
 #include "vm/catalog.h"
@@ -50,11 +51,14 @@ base::Status IndexUtil::CheckIndex(const std::map<std::string, ::openmldb::commo
             col_set.insert(column_name);
             has_iter = true;
             auto iter = column_map.find(column_name);
-            if ((iter != column_map.end() &&
-                 ((iter->second.data_type() == ::openmldb::type::kFloat)
-                  || (iter->second.data_type() == ::openmldb::type::kDouble)))) {
-                return {base::ReturnCode::kError,
-                    "float or double type column can not be index, column is: " + column_key.index_name()};
+            if (iter != column_map.end()) {
+                if (iter->second.data_type() == ::openmldb::type::kFloat
+                        || iter->second.data_type() == ::openmldb::type::kDouble) {
+                    return {base::ReturnCode::kError,
+                        "float or double type column can not be index, column is: " + column_key.index_name()};
+                }
+            } else {
+                return {base::ReturnCode::kError, "can not find col in schema. col: " + column_name};
             }
         }
         if (!has_iter) {
@@ -67,20 +71,31 @@ base::Status IndexUtil::CheckIndex(const std::map<std::string, ::openmldb::commo
                 return {base::ReturnCode::kError, "float or double column can not be index"};
             }
         }
+        if (column_key.has_ts_name()) {
+            if (auto iter = column_map.find(column_key.ts_name()); iter == column_map.end()) {
+                return {base::ReturnCode::kError, "can not find col in schema. col: " + column_key.ts_name()};
+            } else if (iter->second.data_type() != ::openmldb::type::kBigInt
+                  && iter->second.data_type() != ::openmldb::type::kTimestamp) {
+                return {base::ReturnCode::kError,
+                    "ts column type should be bigint or timestamp, column is: " + column_key.ts_name()};
+            }
+        }
         if (column_key.has_ttl()) {
-            if (!CheckTTL(column_key.ttl())) {
-                return {base::ReturnCode::kError, "ttl check failed"};
+            if (auto status = CheckTTL(column_key.ttl()); !status.OK()) {
+                return status;
             }
         }
     }
-    return {};
+    return CheckUnique(index);
 }
 
-bool IndexUtil::CheckTTL(const ::openmldb::common::TTLSt& ttl) {
-    if (ttl.abs_ttl() > FLAGS_absolute_ttl_max || ttl.lat_ttl() > FLAGS_latest_ttl_max) {
-        return false;
+base::Status IndexUtil::CheckTTL(const ::openmldb::common::TTLSt& ttl) {
+    if (ttl.abs_ttl() > FLAGS_absolute_ttl_max) {
+        return {base::ReturnCode::kError, absl::StrCat("absolute ttl cannot be greater than ", FLAGS_absolute_ttl_max)};
+    } else if (ttl.lat_ttl() > FLAGS_latest_ttl_max) {
+        return {base::ReturnCode::kError, absl::StrCat("latest ttl cannot be greater than ", FLAGS_latest_ttl_max)};
     }
-    return true;
+    return {};
 }
 
 bool IndexUtil::AddDefaultIndex(openmldb::nameserver::TableInfo* table_info) {
@@ -137,23 +152,43 @@ base::Status IndexUtil::CheckUnique(const PBIndex& index) {
     return {};
 }
 
-bool IndexUtil::CheckExist(const ::openmldb::common::ColumnKey& column_key,
-        const PBIndex& index, int32_t* pos) {
-    int32_t index_pos = 0;
+bool IndexUtil::IsExist(const ::openmldb::common::ColumnKey& column_key, const PBIndex& index) {
     std::string id_str = GetIDStr(column_key);
-    for (; index_pos < index.size(); index_pos++) {
-        if (index.Get(index_pos).index_name() == column_key.index_name()) {
-            if (index.Get(index_pos).flag() == 0) {
+    for (int32_t index_pos = 0; index_pos < index.size(); index_pos++) {
+        if (index.Get(index_pos).flag() == 0) {
+            if (index.Get(index_pos).index_name() == column_key.index_name() ||
+                    id_str == GetIDStr(index.Get(index_pos))) {
                 return true;
             }
-            break;
-        }
-        if (id_str == GetIDStr(index.Get(index_pos))) {
-            return true;
         }
     }
-    *pos = index_pos;
     return false;
+}
+
+int IndexUtil::GetPosition(const ::openmldb::common::ColumnKey& column_key, const PBIndex& index) {
+    std::string id_str = GetIDStr(column_key);
+    for (int32_t index_pos = 0; index_pos < index.size(); index_pos++) {
+        if (id_str == GetIDStr(index.Get(index_pos))) {
+            return index_pos;
+        }
+    }
+    return -1;
+}
+
+std::vector<::openmldb::common::ColumnKey> IndexUtil::Convert2Vector(const PBIndex& index) {
+    std::vector<::openmldb::common::ColumnKey> vec;
+    for (const auto& column_key : index) {
+        vec.push_back(column_key);
+    }
+    return vec;
+}
+
+PBIndex IndexUtil::Convert2PB(const std::vector<::openmldb::common::ColumnKey>& index) {
+    PBIndex pb_index;
+    for (const auto& column_key : index) {
+        pb_index.Add()->CopyFrom(column_key);
+    }
+    return pb_index;
 }
 
 std::string IndexUtil::GetIDStr(const ::openmldb::common::ColumnKey& column_key) {
@@ -167,25 +202,66 @@ std::string IndexUtil::GetIDStr(const ::openmldb::common::ColumnKey& column_key)
     return id_str;
 }
 
-base::Status IndexUtil::CheckNewIndex(const ::openmldb::common::ColumnKey& column_key,
-        const openmldb::nameserver::TableInfo& table_info) {
-    if (table_info.column_key_size() == 0) {
-        return {base::ReturnCode::kError, "has no index"};
+bool TableIndexInfo::Init() {
+    for (int32_t i = 0; i < table_meta_.column_desc_size(); i++) {
+        column_idx_map_.emplace(table_meta_.column_desc(i).name(), i);
     }
-    std::map<std::string, ::openmldb::common::ColumnDesc> col_map;
-    for (const auto& column_desc : table_info.column_desc()) {
-        col_map.emplace(column_desc.name(), column_desc);
+    uint32_t base_size = table_meta_.column_desc_size();
+    for (int32_t i = 0; i < table_meta_.added_column_desc_size(); ++i) {
+        column_idx_map_.emplace(table_meta_.added_column_desc(i).name(), i + base_size);
     }
-    for (const auto& column_desc : table_info.added_column_desc()) {
-        col_map.emplace(column_desc.name(), column_desc);
-    }
-    std::string id_str = GetIDStr(column_key);
-    for (const auto& cur_column_key : table_info.column_key()) {
-        if (id_str == GetIDStr(cur_column_key)) {
-            return {base::ReturnCode::kError, "duplicated index"};
+    std::set<uint32_t> index_col_set;
+    for (int32_t i = 0; i < table_meta_.column_key_size(); i++) {
+        const auto& ck = table_meta_.column_key(i);
+        if (ck.flag()) {
+            continue;
         }
+        for (const auto& add_ck : add_indexs_) {
+            if (ck.index_name() == add_ck.index_name()) {
+                add_index_idx_vec_.push_back(i);
+                break;
+            }
+        }
+        std::vector<uint32_t> cols;
+        for (const auto& name : ck.col_name()) {
+            auto iter = column_idx_map_.find(name);
+            if (iter != column_idx_map_.end()) {
+                cols.push_back(iter->second);
+                index_col_set.insert(iter->second);
+            } else {
+                return false;
+            }
+        }
+        index_cols_map_.emplace(i, std::move(cols));
     }
-    return {};
+    if (add_index_idx_vec_.size() != add_indexs_.size()) {
+        return false;
+    }
+    std::map<uint32_t, uint32_t> col_idx_map;
+    for (auto idx : index_col_set) {
+        col_idx_map.emplace(idx, all_index_cols_.size());
+        all_index_cols_.push_back(idx);
+    }
+    for (const auto& kv : index_cols_map_) {
+        std::vector<uint32_t> vec;
+        for (auto idx : kv.second) {
+            vec.push_back(col_idx_map[idx]);
+        }
+        real_index_cols_map_.emplace(kv.first, std::move(vec));
+    }
+    return true;
+}
+
+bool TableIndexInfo::HasIndex(uint32_t idx) const {
+    return index_cols_map_.find(idx) != index_cols_map_.end();
+}
+
+const std::vector<uint32_t>& TableIndexInfo::GetIndexCols(uint32_t idx) {
+    return index_cols_map_[idx];
+}
+
+const std::vector<uint32_t>& TableIndexInfo::GetRealIndexCols(uint32_t idx) {
+    return real_index_cols_map_[idx];
 }
 
 }  // namespace schema

@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "base/file_util.h"
-#include "base/glog_wapper.h"
+#include "base/glog_wrapper.h"
 #include "codec/fe_row_codec.h"
 #include "common/timer.h"
 #include "gflags/gflags.h"
@@ -33,12 +33,12 @@
 #include "sdk/sql_cluster_router.h"
 #include "sdk/db_sdk.h"
 #include "test/base_test.h"
+#include "test/util.h"
 #include "vm/catalog.h"
 
 namespace openmldb {
 namespace sdk {
 
-MiniCluster* mc_ = nullptr;
 std::shared_ptr<SQLRouter> router_ = std::shared_ptr<SQLRouter>();
 ::openmldb::sdk::DBSDK * cs_;
 /// TODO(cj): replace rtidb-unsupport with performance-sensitive-unsupport
@@ -127,7 +127,7 @@ TEST_P(SQLSDKQueryTest, SqlSdkBatchTest) {
 TEST_P(SQLSDKQueryTest, SqlSdkRequestProcedureTest) {
     auto sql_case = GetParam();
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
-    if (!IsRequestSupportMode(sql_case.mode())) {
+    if (!IsRequestSupportMode(sql_case.mode()) || "procedure-unsupport" == sql_case.mode()) {
         LOG(WARNING) << "Unsupport mode: " << sql_case.mode();
         return;
     }
@@ -139,7 +139,7 @@ TEST_P(SQLSDKQueryTest, SqlSdkRequestProcedureTest) {
 TEST_P(SQLSDKQueryTest, SqlSdkRequestProcedureAsynTest) {
     auto sql_case = GetParam();
     LOG(INFO) << "ID: " << sql_case.id() << ", DESC: " << sql_case.desc();
-    if (!IsRequestSupportMode(sql_case.mode())) {
+    if (!IsRequestSupportMode(sql_case.mode()) || "procedure-unsupport" == sql_case.mode()) {
         LOG(WARNING) << "Unsupport mode: " << sql_case.mode();
         return;
     }
@@ -164,7 +164,7 @@ TEST_P(SQLSDKBatchRequestQueryTest, SqlSdkBatchRequestTest) {
 }
 TEST_P(SQLSDKBatchRequestQueryTest, SqlSdkBatchRequestProcedureTest) {
     auto sql_case = GetParam();
-    if (!IsBatchRequestSupportMode(sql_case.mode())) {
+    if (!IsBatchRequestSupportMode(sql_case.mode()) || "procedure-unsupport" == sql_case.mode()) {
         LOG(WARNING) << "Unsupport mode: " << sql_case.mode();
         return;
     }
@@ -180,7 +180,7 @@ TEST_P(SQLSDKBatchRequestQueryTest, SqlSdkBatchRequestProcedureTest) {
 
 TEST_P(SQLSDKBatchRequestQueryTest, SqlSdkBatchRequestProcedureAsynTest) {
     auto sql_case = GetParam();
-    if (!IsBatchRequestSupportMode(sql_case.mode())) {
+    if (!IsBatchRequestSupportMode(sql_case.mode()) || "procedure-unsupport" == sql_case.mode()) {
         LOG(WARNING) << "Unsupport mode: " << sql_case.mode();
         return;
     }
@@ -873,13 +873,18 @@ TEST_F(SQLSDKTest, CreatePreAggrTable) {
 }  // namespace openmldb
 
 int main(int argc, char** argv) {
-    ::hybridse::vm::Engine::InitializeGlobalLLVM();
     ::testing::InitGoogleTest(&argc, argv);
+    ::google::ParseCommandLineFlags(&argc, &argv, true);
+    ::hybridse::vm::Engine::InitializeGlobalLLVM();
+    ::openmldb::test::InitRandomDiskFlags("sql_standalone_sdk_test");
     srand(time(NULL));
+
+    ::openmldb::base::SetupGlog(true);
     ::openmldb::sdk::StandaloneEnv env;
     env.SetUp();
     // connect to nameserver
-    ::openmldb::sdk::DBSDK *cs = new ::openmldb::sdk::StandAloneSDK("127.0.0.1", env.GetNsPort());
+    auto sopt = std::make_shared<::openmldb::sdk::StandaloneOptions>("127.0.0.1", env.GetNsPort());
+    ::openmldb::sdk::DBSDK *cs = new ::openmldb::sdk::StandAloneSDK(sopt);
     bool ok = cs->Init();
     if (!ok) {
         std::cout << "Fail to connect to db" << std::endl;
@@ -895,7 +900,6 @@ int main(int argc, char** argv) {
     ::openmldb::sdk::router_ = router;
     ::openmldb::sdk::cs_ = cs;
 
-    ::google::ParseCommandLineFlags(&argc, &argv, true);
     ok = RUN_ALL_TESTS();
     return ok;
 }

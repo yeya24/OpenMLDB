@@ -15,7 +15,11 @@
  */
 
 #include "vm/schemas_context.h"
+
 #include <set>
+
+#include "absl/strings/str_join.h"
+#include "gflags/gflags.h"
 #include "passes/physical/physical_pass.h"
 #include "vm/physical_op.h"
 
@@ -121,14 +125,18 @@ size_t SchemaSource::size() const {
     return schema_ == nullptr ? 0 : schema_->size();
 }
 
-std::string SchemaSource::ToString() const {
+// output: {db}.{table}[ {name}:{type}:{id}, ... ]
+std::string SchemaSource::DebugString() const {
     std::stringstream ss;
+    ss << source_db_ << "." << source_name_ << "[";
     for (size_t i = 0; i < column_ids_.size(); ++i) {
+        ss << schema_->Get(i).name() << ":" << node::TypeName(schema_->Get(i).type()) << ":";
         ss << "#" << std::to_string(column_ids_[i]);
         if (i < column_ids_.size() - 1) {
             ss << ", ";
         }
     }
+    ss << "]";
     return ss.str();
 }
 
@@ -159,7 +167,7 @@ void SchemasContext::SetDefaultDBName(const std::string& default_db_name) {
 }
 SchemaSource* SchemasContext::AddSource() {
     schema_sources_.push_back(new SchemaSource());
-    return schema_sources_[schema_sources_.size() - 1];
+    return schema_sources_.back();
 }
 
 void SchemasContext::Merge(size_t child_idx, const SchemasContext* child) {
@@ -168,7 +176,15 @@ void SchemasContext::Merge(size_t child_idx, const SchemasContext* child) {
         auto new_source = this->AddSource();
         new_source->SetSchema(source->GetSchema());
         // source can take the child name for detail showing
-        new_source->SetSourceDBAndTableName(child->GetDBName(), child->GetName());
+        std::string db_name = child->GetDBName();
+        if (db_name.empty() && !source->GetSourceDB().empty()) {
+            db_name = source->GetSourceDB();
+        }
+        std::string rel_name = child->GetName();
+        if (rel_name.empty() && !source->GetSourceName().empty()) {
+            rel_name = source->GetSourceName();
+        }
+        new_source->SetSourceDBAndTableName(db_name, rel_name);
         for (size_t j = 0; j < source->size(); ++j) {
             // inherit child column id
             new_source->SetColumnID(j, source->GetColumnID(j));
@@ -185,7 +201,17 @@ void SchemasContext::MergeWithNewID(size_t child_idx,
         auto new_source = this->AddSource();
         new_source->SetSchema(source->GetSchema());
         // source can take the child name for detail showing
-        new_source->SetSourceDBAndTableName(child->GetDBName(), child->GetName());
+        // take the first one db/relation name from SchemasContext & SchemaSource,
+        // SchemasContext has higher priority
+        std::string db_name = child->GetDBName();
+        if (db_name.empty() && !source->GetSourceDB().empty()) {
+            db_name = source->GetSourceDB();
+        }
+        std::string rel_name = child->GetName();
+        if (rel_name.empty()&& !source->GetSourceName().empty()) {
+            rel_name = source->GetSourceName();
+        }
+        new_source->SetSourceDBAndTableName(db_name, rel_name);
         for (size_t j = 0; j < source->size(); ++j) {
             // use new column id but record source child column id
             new_source->SetColumnID(j, plan_ctx->GetNewColumnID());
@@ -340,15 +366,13 @@ Status SchemasContext::ResolveColumnID(const std::string& db_name,
     return Status::OK();
 }
 
-static Status DoSearchExprDependentColumns(
-    const node::ExprNode* expr, const SchemasContext* ctx,
-    std::vector<const node::ExprNode*>* columns) {
+Status DoSearchExprDependentColumns(const node::ExprNode* expr, std::vector<const node::ExprNode*>* columns) {
     if (expr == nullptr) {
         return Status::OK();
     }
     for (size_t i = 0; i < expr->GetChildNum(); ++i) {
         CHECK_STATUS(
-            DoSearchExprDependentColumns(expr->GetChild(i), ctx, columns));
+            DoSearchExprDependentColumns(expr->GetChild(i), columns));
     }
     switch (expr->expr_type_) {
         case node::kExprColumnRef: {
@@ -359,29 +383,16 @@ static Status DoSearchExprDependentColumns(
             columns->push_back(expr);
             break;
         }
-        case node::kExprBetween: {
-            std::vector<node::ExprNode*> expr_list;
-            auto between_expr = dynamic_cast<const node::BetweenExpr*>(expr);
-            CHECK_STATUS(DoSearchExprDependentColumns(between_expr->GetLow(), ctx,
-                                                      columns));
-            CHECK_STATUS(DoSearchExprDependentColumns(between_expr->GetHigh(), ctx,
-                                                      columns));
-            CHECK_STATUS(DoSearchExprDependentColumns(between_expr->GetLhs(), ctx,
-                                                      columns));
-            break;
-        }
         case node::kExprCall: {
             auto call_expr = dynamic_cast<const node::CallExprNode*>(expr);
             if (nullptr != call_expr->GetOver()) {
                 auto orders = call_expr->GetOver()->GetOrders();
                 if (nullptr != orders) {
-                    CHECK_STATUS(
-                        DoSearchExprDependentColumns(orders, ctx, columns));
+                    CHECK_STATUS(DoSearchExprDependentColumns(orders, columns));
                 }
                 auto partitions = call_expr->GetOver()->GetPartitions();
                 if (nullptr != partitions) {
-                    CHECK_STATUS(
-                        DoSearchExprDependentColumns(partitions, ctx, columns));
+                    CHECK_STATUS(DoSearchExprDependentColumns(partitions, columns));
                 }
             }
             break;
@@ -395,7 +406,7 @@ static Status DoSearchExprDependentColumns(
 Status SchemasContext::ResolveExprDependentColumns(
     const node::ExprNode* expr, std::set<size_t>* column_ids) const {
     std::vector<const node::ExprNode*> columns;
-    CHECK_STATUS(DoSearchExprDependentColumns(expr, this, &columns));
+    CHECK_STATUS(DoSearchExprDependentColumns(expr, &columns));
 
     column_ids->clear();
     for (auto col_expr : columns) {
@@ -432,7 +443,7 @@ Status SchemasContext::ResolveExprDependentColumns(
     const node::ExprNode* expr,
     std::vector<const node::ExprNode*>* columns) const {
     std::vector<const node::ExprNode*> search_columns;
-    CHECK_STATUS(DoSearchExprDependentColumns(expr, this, &search_columns));
+    CHECK_STATUS(DoSearchExprDependentColumns(expr, &search_columns));
 
     std::set<size_t> column_id_set;
     std::set<std::string> column_name_set;
@@ -547,8 +558,7 @@ void SchemasContext::Build() {
         const SchemaSource* source = schema_sources_[i];
         auto schema = source->GetSchema();
         for (auto j = 0; j < schema->size(); ++j) {
-            column_name_map_[schema->Get(j).name()].push_back(
-                std::make_pair(i, j));
+            column_name_map_[schema->Get(j).name()].emplace_back(i, j);
             size_t column_id = source->GetColumnID(j);
 
             // column id can be duplicate and
@@ -729,7 +739,36 @@ void SchemasContext::BuildTrivial(
     this->Build();
 }
 
-RowParser::RowParser(const SchemasContext* schema_ctx) : schema_ctx_(schema_ctx) {
+std::string SchemasContext::DebugString() const  {
+    std::stringstream ss;
+    ss << absl::StrCat(
+        "{db=", root_db_name_, ", table=", root_relation_name_, ", default_db=", default_db_name_, ", sources={",
+        absl::StrJoin(
+            schema_sources_, ",",
+            [](std::string* out, const SchemaSource* source) { absl::StrAppend(out, source->DebugString()); }),
+        "}");
+    ss << ", id_map={"
+       << absl::StrJoin(column_id_map_, ",", [](std::string* out, decltype(column_id_map_)::const_reference e) {
+              absl::StrAppend(out, e.first, "=(", e.second.first, ",", e.second.second, ")");
+          }) << "}, ";
+    ss << "name_map={"
+       << absl::StrJoin(column_name_map_, ",",
+                        [](std::string* out, decltype(column_name_map_)::const_reference e) {
+                            absl::StrAppend(
+                                out, e.first, "=[",
+                                absl::StrJoin(e.second, ",",
+                                              [](std::string* out, decltype(e.second)::const_reference ref) {
+                                                  absl::StrAppend(out, "(", ref.first, ",", ref.second, ")");
+                                              }),
+                                "]");
+                        })
+       << "}";
+    ss << "}";
+    return ss.str();
+}
+
+RowParser::RowParser(const SchemasContext* schema_ctx)
+    : schema_ctx_(schema_ctx) {
     for (size_t i = 0; i < schema_ctx_->GetSchemaSourceSize(); ++i) {
         auto source = schema_ctx_->GetSchemaSource(i);
         row_view_list_.push_back(codec::RowView(*source->GetSchema()));

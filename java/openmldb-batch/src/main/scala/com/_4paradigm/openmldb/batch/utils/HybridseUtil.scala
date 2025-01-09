@@ -17,16 +17,20 @@
 package com._4paradigm.openmldb.batch.utils
 
 import java.util
-import com._4paradigm.hybridse.`type`.TypeOuterClass.{ColumnDef, Database, TableDef}
+import com._4paradigm.hybridse.`type`.TypeOuterClass.{ColumnDef, Database, TableDef, Type => HybridseProtoType}
 import com._4paradigm.hybridse.node.ConstNode
 import com._4paradigm.hybridse.sdk.UnsupportedHybridSeException
 import com._4paradigm.hybridse.vm.{PhysicalLoadDataNode, PhysicalOpNode, PhysicalSelectIntoNode}
+import com._4paradigm.openmldb.batch.api.OpenmldbSession
+import com._4paradigm.openmldb.batch.{PlanContext}
 import com._4paradigm.openmldb.proto
 import com._4paradigm.openmldb.proto.Common
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.functions.{col, first}
-import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, FloatType, IntegerType, LongType,
-  ShortType, StringType, StructField, StructType, TimestampType}
+import org.apache.spark.sql.types.{
+  BooleanType, DataType, DateType, DoubleType, FloatType, IntegerType, LongType,
+  ShortType, StringType, StructField, StructType, TimestampType
+}
 import org.apache.spark.sql.{DataFrame, DataFrameReader, Row, SparkSession}
 import org.slf4j.LoggerFactory
 
@@ -69,10 +73,13 @@ object HybridseUtil {
   def getTableDef(tableName: String, dataFrame: DataFrame): TableDef = {
     val tblBulder = TableDef.newBuilder()
     dataFrame.schema.foreach(field => {
-      tblBulder.addColumns(ColumnDef.newBuilder()
+      var sc = DataTypeUtil.sparkTypeToHybridseProtoType(field.dataType)
+      tblBulder.addColumns(
+        ColumnDef.newBuilder()
         .setName(field.name)
         .setIsNotNull(!field.nullable)
-        .setType(DataTypeUtil.sparkTypeToHybridseProtoType(field.dataType))
+        .setSchema(sc)
+        .setType(if (sc.hasBaseType()) {sc.getBaseType()} else {HybridseProtoType.kNull})
         .build()
       )
     })
@@ -83,17 +90,20 @@ object HybridseUtil {
   def getHybridseSchema(structType: StructType): java.util.List[ColumnDef] = {
     val list = new util.ArrayList[ColumnDef]()
     structType.foreach(field => {
+      var sc = DataTypeUtil.sparkTypeToHybridseProtoType(field.dataType)
       list.add(ColumnDef.newBuilder()
         .setName(field.name)
         .setIsNotNull(!field.nullable)
-        .setType(DataTypeUtil.sparkTypeToHybridseProtoType(field.dataType)).build())
+        .setSchema(sc)
+        .setType(if (sc.hasBaseType()) {sc.getBaseType()} else {HybridseProtoType.kNull})
+        .build())
     })
     list
   }
 
   def getSparkSchema(columns: java.util.List[ColumnDef]): StructType = {
     StructType(columns.asScala.map(col => {
-      StructField(col.getName, DataTypeUtil.hybridseProtoTypeToSparkType(col.getType), !col.getIsNotNull)
+      StructField(col.getName, DataTypeUtil.hybridseProtoTypeToSparkType(col.getSchema), !col.getIsNotNull)
     }))
   }
 
@@ -127,7 +137,7 @@ object HybridseUtil {
   }
 
   def createUnsafeGroupKeyComparator(keyIdxs: Array[Int], dataTypes: Array[DataType]):
-    (UnsafeRow, UnsafeRow) => Boolean = {
+  (UnsafeRow, UnsafeRow) => Boolean = {
     // TODO(tobe): check for different data types
 
     if (keyIdxs.length == 1) {
@@ -154,6 +164,22 @@ object HybridseUtil {
       node.GetBool().toString
     } else {
       default
+    }
+  }
+
+  def getIntOrDefault(node: ConstNode, default: String): String = {
+    if (node != null) {
+      node.GetInt().toString
+    } else {
+      default
+    }
+  }
+
+  def getIntOrNone(node: ConstNode): Option[Int] = {
+    if (node != null) {
+      Option(node.GetInt())
+    } else {
+      None
     }
   }
 
@@ -188,42 +214,71 @@ object HybridseUtil {
     }
   }
 
-  def parseOptions[T](node: T): (String, Map[String, String], String, Option[Boolean]) = {
+  // 'file' may change the option 'format':
+  // If file starts with 'hive'/'iceberg', format is hive/iceberg, not the detail format in hive
+  // If file starts with 'openmldb', format is openmldb, not the detail format in openmldb
+  // Others, format is the origin format option
+  // **Result**: format, options(spark write/read options), mode is common, if more options, set them to extra map
+  def parseOptions[T](file: String, node: T):
+  (String, Map[String, String], String, Map[String, String]) = {
     // load data: read format, select into: write format
-    val format = parseOption(getOptionFromNode(node, "format"), "csv", getStringOrDefault).toLowerCase
-    require(format.equals("csv") || format.equals("parquet"))
+    // parse hive/iceberg to avoid user forget to set format
+    val format = if (file.toLowerCase().startsWith("hive://")) {
+      "hive"
+    } else if (file.toLowerCase().startsWith("iceberg://")) {
+      "iceberg"
+    } else if (file.toLowerCase().startsWith("openmldb://")) {
+      "openmldb" // TODO(hw): no doc for it
+    } else if (file.toLowerCase().startsWith("tidb://")) {
+      "tidb"
+    } else {
+      parseOption(getOptionFromNode(node, "format"), "csv", getStringOrDefault).toLowerCase
+    }
 
     // load data: read options, select into: write options
+    // parquet/hive format doesn't support any option now, consistent with write options(empty) when deep copy
     val options: mutable.Map[String, String] = mutable.Map()
-    // default values:
-    // delimiter -> sep: ,
-    // header: true(different with spark)
-    // null_value -> nullValue: null(different with spark)
-    // quote: '\0'(means no quote, the same with spark quote "empty string")
-    options += ("header" -> "true")
-    options += ("nullValue" -> "null")
-    updateOptionsMap(options, getOptionFromNode(node, "delimiter"), "sep", getStr)
-    updateOptionsMap(options, getOptionFromNode(node, "header"), "header", getBool)
-    updateOptionsMap(options, getOptionFromNode(node, "null_value"), "nullValue", getStr)
-    updateOptionsMap(options, getOptionFromNode(node, "quote"), "quote", getStr)
+    if (format.equals("csv")) {
+      // default values: https://spark.apache.org/docs/3.2.1/sql-data-sources-csv.html
+      // delimiter -> sep: ,(the same with spark3 default sep)
+      // header: true(different with spark)
+      // null_value -> nullValue: null(different with spark)
+      // quote: `"`(the same with spark3 default quote)
+      options += ("header" -> "true")
+      options += ("nullValue" -> "null")
+      updateOptionsMap(options, getOptionFromNode(node, "delimiter"), "sep", getStr)
+      updateOptionsMap(options, getOptionFromNode(node, "header"), "header", getBool)
+      updateOptionsMap(options, getOptionFromNode(node, "null_value"), "nullValue", getStr)
+      updateOptionsMap(options, getOptionFromNode(node, "quote"), "quote", getStr)
+    }
 
     // load data: write mode(load data may write to offline storage or online storage, needs mode too)
     // select into: write mode
-    val modeStr = parseOption(getOptionFromNode(node, "mode"), "error_if_exists", HybridseUtil
-      .getStringOrDefault).toLowerCase
+    val modeStr = parseOption(getOptionFromNode(node, "mode"), "error_if_exists", getStringOrDefault).toLowerCase
     val mode = modeStr match {
       case "error_if_exists" => "errorifexists"
       // append/overwrite, stay the same
       case "append" | "overwrite" => modeStr
-      case others: Any => throw new UnsupportedHybridSeException(s"unsupported write mode $others")
+      case _ => throw new UnsupportedHybridSeException(s"unsupported write mode $modeStr")
     }
 
+    // extra options for some special case
+    var extraOptions: mutable.Map[String, String] = mutable.Map()
     // only for PhysicalLoadDataNode
-    var deepCopy: Option[Boolean] = None
-    if (node.isInstanceOf[PhysicalLoadDataNode]) {
-      deepCopy = Option(parseOption(getOptionFromNode(node, "deep_copy"), "true", getBoolOrDefault).toBoolean)
-    }
-    (format, options.toMap, mode, deepCopy)
+    extraOptions += ("deep_copy" -> parseOption(getOptionFromNode(node, "deep_copy"), "true", getBoolOrDefault))
+    extraOptions += ("writer_type") -> parseOption(getOptionFromNode(node, "writer_type"), "single",
+      getStringOrDefault)
+    extraOptions += ("sql" -> parseOption(getOptionFromNode(node, "sql"), "", getStringOrDefault))
+    extraOptions += ("put_if_absent" -> parseOption(getOptionFromNode(node, "put_if_absent"), "false",
+      getBoolOrDefault))
+
+    // only for select into, "" means N/A
+    extraOptions += ("coalesce" -> parseOption(getOptionFromNode(node, "coalesce"), "0", getIntOrDefault))
+    extraOptions += ("create_if_not_exists" -> parseOption(getOptionFromNode(node, "create_if_not_exists"),
+      "true", getBoolOrDefault))
+    extraOptions += ("skip_cvt" -> parseOption(getOptionFromNode(node, "skip_cvt"),
+      "false", getBoolOrDefault))
+    (format, options.toMap, mode, extraOptions.toMap)
   }
 
   // result 'readSchema' & 'tsCols' is only for csv format, may not be used
@@ -245,6 +300,7 @@ object HybridseUtil {
         .getNotNull)
     }
     )
+    logger.debug(s"table schema $oriSchema, may use read schema $readSchema")
     (oriSchema, readSchema, tsCols.toList)
   }
 
@@ -278,44 +334,16 @@ object HybridseUtil {
     longTsCols.toList
   }
 
-  // We want df with oriSchema, but if the file format is csv:
-  // 1. we support two format of timestamp
-  // 2. spark read may change the df schema to all nullable
-  // So we should fix it.
-  def autoLoad(spark: SparkSession, file: String, format: String, options: Map[String, String], columns: util
-  .List[Common.ColumnDesc]): DataFrame = {
-    val reader = spark.read.options(options)
-    val (oriSchema, readSchema, tsCols) = HybridseUtil.extractOriginAndReadSchema(columns)
-    if (format != "csv") {
-      return reader.schema(oriSchema).format(format).load(file)
-    }
-    // csv should auto detect the timestamp format
+  def getOpenmldbDbAndTable(path: String): (String, String) = {
+    require(path.toLowerCase.startsWith("openmldb://"), s"unsupported path $path")
+    // openmldb://<table_pattern>
+    val tableStartPos = 11
+    val dbAndTableString = path.substring(tableStartPos)
 
-    logger.info(s"set file format: $format")
-    reader.format(format)
-    // use string to read, then infer the format by the first non-null value of the ts column
-    val longTsCols = HybridseUtil.parseLongTsCols(reader, readSchema, tsCols, file)
-    logger.info(s"read schema: $readSchema, file $file")
-    var df = reader.schema(readSchema).load(file)
-    if (longTsCols.nonEmpty) {
-      // convert long type to timestamp type
-      for (tsCol <- longTsCols) {
-        df = df.withColumn(tsCol, (col(tsCol) / 1000).cast("timestamp"))
-      }
-    }
+    require(dbAndTableString.split("\\.").size == 2, s"invalid path $path")
 
-    // if we read non-streaming files, the df schema fields will be set as all nullable.
-    // so we need to set it right
-    logger.info(s"after read schema: ${df.schema}")
-    if (!df.schema.equals(oriSchema)) {
-      df = df.sqlContext.createDataFrame(df.rdd, oriSchema)
-    }
-
-    require(df.schema == oriSchema, "df schema must == table schema")
-    if (logger.isDebugEnabled()) {
-      logger.debug("read dataframe count: {}", df.count())
-      df.show(10)
-    }
-    df
+    val db = dbAndTableString.split("\\.")(0)
+    val table = dbAndTableString.split("\\.")(1)
+    (db, table)
   }
 }

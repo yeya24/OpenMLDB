@@ -18,22 +18,21 @@
 
 #include <algorithm>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <set>
 
-#include "absl/strings/match.h"
 #include "codec/schema_codec.h"
-#include "common/timer.h"
+#include "google/protobuf/util/message_differencer.h"
 #include "node/node_manager.h"
 #include "plan/plan_api.h"
 #include "proto/common.pb.h"
 #include "proto/fe_type.pb.h"
+#include "proto/type.pb.h"
 #include "sdk/base_impl.h"
-#include "sdk/sql_insert_row.h"
-#include "vm/engine.h"
 #include "vm/physical_op.h"
-#include "vm/simple_catalog.h"
 
 namespace openmldb::base {
 
@@ -47,32 +46,24 @@ using hybridse::vm::PhysicalOpType;
 using hybridse::vm::SchemasContext;
 using hybridse::vm::Sort;
 
-constexpr const char* DB_NAME = "ddl_parser_db";
-
-// Ref hybridse/src/passes/physical/group_and_sort_optimized.cc:651
-// // TODO(hw): hybridse should open this method
-bool ResolveColumnToSourceColumnName(const hybridse::node::ColumnRefNode* col, const SchemasContext* schemas_ctx,
-                                     std::string* source_name);
-
-class IndexMapBuilder {
+class IndexMapBuilder final : public ::hybridse::vm::IndexHintHandler {
  public:
-    IndexMapBuilder() = default;
-    // Create the index with unset TTLSt, return false if the index(same table, same keys, same ts) existed
-    bool CreateIndex(const std::string& table, const hybridse::node::ExprListNode* keys,
-                     const hybridse::node::OrderByNode* ts, const SchemasContext* ctx);
-    bool UpdateIndex(const hybridse::vm::Range& range);
-    // After ToMap, inner data will be cleared
-    IndexMap ToMap();
+    IndexMapBuilder() {}
+    ~IndexMapBuilder() override {}
+
+    void Report(absl::string_view db, absl::string_view table, absl::Span<std::string const> keys, absl::string_view ts,
+                const PhysicalOpNode* expr_node) override;
+
+    MultiDBIndexMap ToMap();
 
  private:
-    static std::vector<std::string> NormalizeColumns(const std::string& table,
-                                                     const std::vector<hybridse::node::ExprNode*>& nodes,
-                                                     const SchemasContext* ctx);
-    // table, keys and ts -> table:key1,key2,...;ts
-    static std::string Encode(const std::string& table, const hybridse::node::ExprListNode* keys,
-                              const hybridse::node::OrderByNode* ts, const SchemasContext* ctx);
+    void UpdateTTLByWindow(const hybridse::vm::WindowOp&, common::TTLSt*);
+    // db, table, keys and ts -> db$table:key1,key2,...;ts
+    std::string Encode(absl::string_view db, absl::string_view table, absl::Span<std::string const> keys,
+                       absl::string_view ts);
 
-    static std::pair<std::string, common::ColumnKey> Decode(const std::string& index_str);
+    // return db, table, index_str(key1,key2,...;ts), column_key
+    static std::tuple<std::string, std::string, std::string, common::ColumnKey> Decode(const std::string& index_str);
 
     static std::string GetTsCol(const std::string& index_str) {
         std::size_t ts_mark_pos = index_str.find(TS_MARK);
@@ -83,125 +74,61 @@ class IndexMapBuilder {
         return index_str.substr(ts_begin);
     }
 
-    static std::string GetTable(const std::string& index_str) {
+    static std::pair<std::string, std::string> GetTable(const std::string& index_str) {
+        auto db_table_start = index_str.find(UNIQ_MARK);
+        auto table_start = index_str.find(TABLE_MARK);
         auto key_sep = index_str.find(KEY_MARK);
-        if (key_sep == std::string::npos) {
+        if (db_table_start == std::string::npos || table_start == std::string::npos || key_sep == std::string::npos) {
+            LOG(DFATAL) << "invalid index str " << index_str;
             return {};
         }
-        return index_str.substr(0, key_sep);
+        // i|db$table:key1,key2,...
+        return std::make_pair(index_str.substr(db_table_start + 1, table_start - db_table_start - 1),
+                              index_str.substr(table_start + 1, key_sep - 1 - table_start));
     }
 
  private:
+    static constexpr char UNIQ_MARK = '|';
+    static constexpr char TABLE_MARK = '$';
     static constexpr char KEY_MARK = ':';
     static constexpr char KEY_SEP = ',';
     static constexpr char TS_MARK = ';';
 
-    std::string latest_record_;
-    // map<table_keys_and_order_str, ttl_st>
+    uint64_t index_id_ = 0;
+    // map<db_table_keys_and_order_str, ttl_st>
     std::map<std::string, common::TTLSt*> index_map_;
 };
 
-// no plan_ctx_, node_manager_: we assume that creating new op won't affect the upper level structure.
-class GroupAndSortOptimizedParser {
- public:
-    GroupAndSortOptimizedParser() = default;
+// multi database
+MultiDBIndexMap DDLParser::ExtractIndexes(const std::string& sql, const std::string& used_db,
+                                          const MultiDBTableDescMap& schemas) {
+    auto catalog = buildCatalog(schemas);
+    return ExtractIndexes(sql, used_db, catalog);
+}
 
-    // LRD
-    void Parse(PhysicalOpNode* cur_op) {
-        if (!cur_op) {
-            LOG(DFATAL) << "parse nullptr";
-            return;
-        }
-
-        // just parse, won't modify, but need to cast ptr, so we use non-const producers.
-        auto& producers = cur_op->producers();
-        for (auto& producer : producers) {
-            Parse(producer);
-        }
-
-        DLOG(INFO) << "parse " << hybridse::vm::PhysicalOpTypeName(cur_op->GetOpType());
-        TransformParse(cur_op);
-    }
-
-    IndexMap GetIndexes() { return index_map_builder_.ToMap(); }
-
- private:
-    // recursive parse, return true iff kProviderTypeTable optimized
-    // new_in is useless, but we keep it, GroupAndSortOptimizedParser will be more similar to GroupAndSortOptimized.
-    bool KeysOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Key* left_key, Key* index_key,
-                            Key* right_key, Sort* sort, PhysicalOpNode** new_in);
-
-    bool KeysAndOrderFilterOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Key* group,
-                                          Key* hash, Sort* sort, PhysicalOpNode** new_in) {
-        return KeysOptimizedParse(root_schemas_ctx, in, group, hash, nullptr, sort, new_in);
-    }
-
-    bool JoinKeysOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Join* join,
-                                PhysicalOpNode** new_in) {
-        if (nullptr == join) {
-            return false;
-        }
-        return FilterAndOrderOptimizedParse(root_schemas_ctx, in, join, &join->right_sort_, new_in);
-    }
-    bool FilterAndOrderOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Filter* filter,
-                                      Sort* sort, PhysicalOpNode** new_in) {
-        return KeysOptimizedParse(root_schemas_ctx, in, &filter->left_key_, &filter->index_key_, &filter->right_key_,
-                                  sort, new_in);
-    }
-    bool FilterOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Filter* filter,
-                              PhysicalOpNode** new_in) {
-        return FilterAndOrderOptimizedParse(root_schemas_ctx, in, filter, nullptr, new_in);
-    }
-    bool KeyAndOrderOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Key* group, Sort* sort,
-                                   PhysicalOpNode** new_in) {
-        Key mock_key;
-        return KeysAndOrderFilterOptimizedParse(root_schemas_ctx, in, group, &mock_key, sort, new_in);
-    }
-    bool GroupOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in, Key* group,
-                             PhysicalOpNode** new_in) {
-        return KeyAndOrderOptimizedParse(root_schemas_ctx, in, group, nullptr, new_in);
-    }
-
-    static std::vector<PhysicalOpNode*> InitJoinList(hybridse::vm::PhysicalWindowAggrerationNode* op);
-
-    void TransformParse(PhysicalOpNode* in);
-
- private:
-    IndexMapBuilder index_map_builder_;
-};
-
-IndexMap DDLParser::ExtractIndexes(const std::string& sql, const ::hybridse::type::Database& db) {
+MultiDBIndexMap DDLParser::ExtractIndexes(const std::string& sql, const std::string& used_db,
+                                          const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog) {
     hybridse::vm::MockRequestRunSession session;
-    return ExtractIndexes(sql, db, &session);
+    auto index_hints = std::make_shared<IndexMapBuilder>();
+    session.SetIndexHintsHandler(index_hints);
+
+    ::hybridse::vm::Engine::InitializeGlobalLLVM();
+    ::hybridse::vm::EngineOptions options;
+    options.SetKeepIr(true);
+    options.SetCompileOnly(true);
+    auto engine = std::make_shared<hybridse::vm::Engine>(catalog, options);
+
+    hybridse::base::Status status;
+    engine->Get(sql, used_db, session, status);
+
+    return index_hints->ToMap();
 }
 
-IndexMap DDLParser::ExtractIndexes(
-    const std::string& sql,
-    const std::map<std::string, ::google::protobuf::RepeatedPtrField<::openmldb::common::ColumnDesc>>& schemas) {
-    ::hybridse::type::Database db;
-    std::string tmp_db = "temp_" + std::to_string(::baidu::common::timer::get_micros() / 1000);
-    db.set_name(tmp_db);
-    AddTables(schemas, &db);
-    return ExtractIndexes(sql, db);
-}
-
-IndexMap DDLParser::ExtractIndexes(const std::string& sql,
-                                   const std::map<std::string, std::vector<::openmldb::common::ColumnDesc>>& schemas) {
-    ::hybridse::type::Database db;
-    std::string tmp_db = "temp_" + std::to_string(::baidu::common::timer::get_micros() / 1000);
-    db.set_name(tmp_db);
-    AddTables(schemas, &db);
-    return ExtractIndexes(sql, db);
-}
-
-IndexMap DDLParser::ExtractIndexesForBatch(const std::string& sql, const ::hybridse::type::Database& db) {
-    hybridse::vm::BatchRunSession session;
-    return ExtractIndexes(sql, db, &session);
-}
-
-std::string DDLParser::Explain(const std::string& sql, const ::hybridse::type::Database& db) {
+std::string DDLParser::PhysicalPlan(const std::string& sql, const ::hybridse::type::Database& db) {
     hybridse::vm::MockRequestRunSession session;
-    if (!GetPlan(sql, db, &session)) {
+    auto catalog = std::make_shared<hybridse::vm::SimpleCatalog>(true);
+    catalog->AddDatabase(db);
+    if (!GetPlan(sql, db.name(), catalog, &session)) {
         LOG(ERROR) << "sql get plan failed";
         return {};
     }
@@ -210,9 +137,34 @@ std::string DDLParser::Explain(const std::string& sql, const ::hybridse::type::D
     return plan_oss.str();
 }
 
+bool DDLParser::Explain(const std::string& sql, const std::string& db,
+                        const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog,
+                        hybridse::vm::ExplainOutput* output) {
+    ::hybridse::base::Status vm_status;
+    ::hybridse::vm::Engine::InitializeGlobalLLVM();
+    ::hybridse::vm::EngineOptions options;
+    options.SetKeepIr(true);
+    options.SetCompileOnly(true);
+    auto engine = std::make_shared<hybridse::vm::Engine>(catalog, options);
+    // use mock, to disable enable_request_performance_sensitive, avoid no matched index, it may get error `Isn't
+    // partition provider:DATA_PROVIDER(table=xxx)`
+    auto ok = engine->Explain(sql, db, ::hybridse::vm::kMockRequestMode, output, &vm_status);
+    if (!ok) {
+        LOG(WARNING) << "hybrid engine compile sql failed, " << vm_status.str();
+        return false;
+    }
+    return true;
+}
+
+bool DDLParser::Explain(const std::string& sql, const std::string& db, const MultiDBTableDescMap& schemas,
+                        ::hybridse::vm::ExplainOutput* output) {
+    auto catalog = buildCatalog(schemas);
+    return Explain(sql, db, catalog, output);
+}
+
 hybridse::sdk::Status DDLParser::ExtractLongWindowInfos(const std::string& sql,
-                                                  const std::unordered_map<std::string, std::string>& window_map,
-                                                  LongWindowInfos* infos) {
+                                                        const std::unordered_map<std::string, std::string>& window_map,
+                                                        LongWindowInfos* infos) {
     hybridse::node::NodeManager node_manager;
     hybridse::base::Status sql_status;
     hybridse::node::PlanNodeList plan_trees;
@@ -220,7 +172,8 @@ hybridse::sdk::Status DDLParser::ExtractLongWindowInfos(const std::string& sql,
 
     if (0 != sql_status.code) {
         DLOG(ERROR) << sql_status.msg;
-        return hybridse::sdk::Status(base::ReturnCode::kError, sql_status.msg, sql_status.GetTraces());
+        return hybridse::sdk::Status(::hybridse::common::StatusCode::kSyntaxError, sql_status.msg,
+                                     sql_status.GetTraces());
     }
 
     hybridse::node::PlanNode* node = plan_trees[0];
@@ -228,13 +181,13 @@ hybridse::sdk::Status DDLParser::ExtractLongWindowInfos(const std::string& sql,
         case hybridse::node::kPlanTypeQuery: {
             // TODO(ace): Traverse Node return Status
             if (!TraverseNode(node, window_map, infos)) {
-                return hybridse::sdk::Status(base::ReturnCode::kError, "TraverseNode failed");
+                return hybridse::sdk::Status(::hybridse::common::StatusCode::kUnsupportPlan, "TraverseNode failed");
             }
             break;
         }
         default: {
             DLOG(ERROR) << "only support extract long window infos from query";
-            return hybridse::sdk::Status(base::ReturnCode::kError,
+            return hybridse::sdk::Status(::hybridse::common::StatusCode::kUnsupportPlan,
                                          "only support extract long window infos from query");
         }
     }
@@ -243,8 +196,8 @@ hybridse::sdk::Status DDLParser::ExtractLongWindowInfos(const std::string& sql,
 }
 
 bool DDLParser::TraverseNode(hybridse::node::PlanNode* node,
-                                const std::unordered_map<std::string, std::string>& window_map,
-                                LongWindowInfos* long_window_infos) {
+                             const std::unordered_map<std::string, std::string>& window_map,
+                             LongWindowInfos* long_window_infos) {
     switch (node->GetType()) {
         case hybridse::node::kPlanTypeProject: {
             hybridse::node::ProjectPlanNode* project_plan_node = dynamic_cast<hybridse::node::ProjectPlanNode*>(node);
@@ -271,8 +224,8 @@ bool DDLParser::ExtractInfosFromProjectPlan(hybridse::node::ProjectPlanNode* pro
             DLOG(ERROR) << "extract long window infos from project list failed";
             return false;
         }
-        hybridse::node::ProjectListNode* project_list_node
-            = dynamic_cast<hybridse::node::ProjectListNode*>(project_list);
+        hybridse::node::ProjectListNode* project_list_node =
+            dynamic_cast<hybridse::node::ProjectListNode*>(project_list);
         auto window = project_list_node->GetW();
         if (window == nullptr) {
             continue;
@@ -308,7 +261,7 @@ bool DDLParser::ExtractInfosFromProjectPlan(hybridse::node::ProjectPlanNode* pro
                 return false;
             }
             const hybridse::node::ColumnRefNode* column_node =
-                    reinterpret_cast<const hybridse::node::ColumnRefNode*>(order_col_node);
+                reinterpret_cast<const hybridse::node::ColumnRefNode*>(order_col_node);
             order_by_col += column_node->GetColumnName() + ",";
         }
         if (!order_by_col.empty()) {
@@ -371,8 +324,9 @@ bool DDLParser::ExtractInfosFromProjectPlan(hybridse::node::ProjectPlanNode* pro
                 }
             }
 
-            (*long_window_infos).emplace_back(window_name, aggr_name, aggr_col,
-                                           partition_col, order_by_col, window_map.at(window_name));
+            (*long_window_infos)
+                .emplace_back(window_name, aggr_name, aggr_col, partition_col, order_by_col,
+                              window_map.at(window_name));
             if (!filter_col.empty()) {
                 (*long_window_infos).back().filter_col_ = filter_col;
             }
@@ -381,25 +335,18 @@ bool DDLParser::ExtractInfosFromProjectPlan(hybridse::node::ProjectPlanNode* pro
     return true;
 }
 
-IndexMap DDLParser::ExtractIndexes(const std::string& sql, const hybridse::type::Database& db,
-                                   hybridse::vm::RunSession* session) {
-    // To show index-based-optimization -> IndexSupport() == true -> whether to do LeftJoinOptimized
-    // tablet catalog supports index, so we should add index support too
-    auto cp = db;
-    cp.set_name(DB_NAME);
-    if (!GetPlan(sql, cp, session)) {
-        LOG(ERROR) << "sql get plan failed";
-        return {};
-    }
-    auto compile_info = session->GetCompileInfo();
-    auto plan = session->GetCompileInfo()->GetPhysicalPlan();
-    return ParseIndexes(const_cast<hybridse::vm::PhysicalOpNode*>(plan));
+// schemas: <db, <table, columns>>
+std::shared_ptr<hybridse::sdk::Schema> DDLParser::GetOutputSchema(const std::string& sql, const std::string& db,
+                                                                  const MultiDBTableDescMap& schemas) {
+    // multi database
+    auto catalog = buildCatalog(schemas);
+    return GetOutputSchema(sql, db, catalog);
 }
 
-std::shared_ptr<hybridse::sdk::Schema> DDLParser::GetOutputSchema(const std::string& sql,
-                                                                  const hybridse::type::Database& db) {
+std::shared_ptr<hybridse::sdk::Schema> DDLParser::GetOutputSchema(
+    const std::string& sql, const std::string& db, const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog) {
     hybridse::vm::MockRequestRunSession session;
-    if (!GetPlan(sql, db, &session)) {
+    if (!GetPlan(sql, db, catalog, &session)) {
         LOG(ERROR) << "sql get plan failed";
         return {};
     }
@@ -407,45 +354,32 @@ std::shared_ptr<hybridse::sdk::Schema> DDLParser::GetOutputSchema(const std::str
     return std::make_shared<hybridse::sdk::SchemaImpl>(*output_schema_ptr);
 }
 
-std::shared_ptr<hybridse::sdk::Schema> DDLParser::GetOutputSchema(
-    const std::string& sql, const std::map<std::string, std::vector<::openmldb::common::ColumnDesc>>& schemas) {
-    ::hybridse::type::Database db;
-    std::string tmp_db = "temp_" + std::to_string(::baidu::common::timer::get_micros() / 1000);
-    db.set_name(tmp_db);
-    AddTables(schemas, &db);
-    return GetOutputSchema(sql, db);
+bool DDLParser::GetPlan(const std::string& sql, const std::string& db,
+                        const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog,
+                        hybridse::vm::RunSession* session) {
+    hybridse::base::Status status;
+    return GetPlan(sql, db, catalog, session, &status);
 }
 
-IndexMap DDLParser::ParseIndexes(hybridse::vm::PhysicalOpNode* node) {
-    // This physical plan is optimized, but no real optimization about index(cuz no index in fake catalog).
-    // So we can run GroupAndSortOptimizedParser on the plan(very like transformer's pass-ApplyPasses)
-    GroupAndSortOptimizedParser parser;
-    parser.Parse(node);
-    return parser.GetIndexes();
-}
-
-bool DDLParser::GetPlan(const std::string& sql, const hybridse::type::Database& db, hybridse::vm::RunSession* session) {
-    // TODO(hw): engine should be the input, do not create in here
-    auto catalog = std::make_shared<hybridse::vm::SimpleCatalog>(true);
-    catalog->AddDatabase(db);
+bool DDLParser::GetPlan(const std::string& sql, const std::string& db,
+                        const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog, hybridse::vm::RunSession* session,
+                        hybridse::base::Status* status) {
     ::hybridse::vm::Engine::InitializeGlobalLLVM();
     ::hybridse::vm::EngineOptions options;
     options.SetKeepIr(true);
     options.SetCompileOnly(true);
     auto engine = std::make_shared<hybridse::vm::Engine>(catalog, options);
-
-    ::hybridse::base::Status status;
-    auto ok = engine->Get(sql, db.name(), *session, status);
-    if (!(ok && status.isOK())) {
-        LOG(WARNING) << "hybrid engine compile sql failed, " << status.str();
+    auto ok = engine->Get(sql, db, *session, *status);
+    if (!(ok && status->isOK())) {
+        LOG(WARNING) << "hybrid engine compile sql failed, " << status->str();
         return false;
     }
     return true;
 }
 
 template <typename T>
-void DDLParser::AddTables(const T& schema, hybridse::type::Database* db) {
-    for (auto& table : schema) {
+void DDLParser::AddTables(const T& table_defs, hybridse::type::Database* db) {
+    for (auto& table : table_defs) {
         // add to database
         auto def = db->add_tables();
         def->set_name(table.first);
@@ -458,27 +392,112 @@ void DDLParser::AddTables(const T& schema, hybridse::type::Database* db) {
     }
 }
 
-bool IndexMapBuilder::CreateIndex(const std::string& table, const hybridse::node::ExprListNode* keys,
-                                  const hybridse::node::OrderByNode* ts, const SchemasContext* ctx) {
+std::shared_ptr<hybridse::vm::SimpleCatalog> DDLParser::buildCatalog(const MultiDBTableDescMap& schemas) {
+    auto catalog = std::make_shared<hybridse::vm::SimpleCatalog>(true);
+    for (auto& db_item : schemas) {
+        auto& db_name = db_item.first;
+        auto& table_map = db_item.second;
+        ::hybridse::type::Database db;
+        db.set_name(db_name);
+        AddTables(table_map, &db);
+        catalog->AddDatabase(db);
+    }
+    return catalog;
+}
+
+std::vector<std::string> DDLParser::ValidateSQLInBatch(const std::string& sql, const std::string& db,
+                                                       const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog) {
+    hybridse::vm::BatchRunSession session;
+    hybridse::base::Status status;
+    auto ok = GetPlan(sql, db, catalog, &session, &status);
+    if (!ok || !status.isOK()) {
+        return {status.GetMsg(), status.GetTraces()};
+    }
+    return {};
+}
+
+std::vector<std::string> DDLParser::ValidateSQLInBatch(const std::string& sql, const std::string& db,
+                                                       const MultiDBTableDescMap& schemas) {
+    auto catalog = buildCatalog(schemas);
+    return ValidateSQLInBatch(sql, db, catalog);
+}
+
+std::vector<std::string> DDLParser::ValidateSQLInRequest(const std::string& sql, const std::string& db,
+                                                         const std::shared_ptr<hybridse::vm::SimpleCatalog>& catalog) {
+    hybridse::vm::MockRequestRunSession session;
+    hybridse::base::Status status;
+    auto ok = GetPlan(sql, db, catalog, &session, &status);
+    if (!ok || !status.isOK()) {
+        return {status.GetMsg(), status.GetTraces()};
+    }
+    return {};
+}
+
+std::vector<std::string> DDLParser::ValidateSQLInRequest(const std::string& sql, const std::string& db,
+                                                         const MultiDBTableDescMap& schemas) {
+    auto catalog = buildCatalog(schemas);
+    return ValidateSQLInRequest(sql, db, catalog);
+}
+
+void IndexMapBuilder::Report(absl::string_view db, absl::string_view table, absl::Span<std::string const> keys,
+                             absl::string_view ts, const PhysicalOpNode* expr_node) {
     // we encode table, keys and ts to one string
-    auto index = Encode(table, keys, ts, ctx);
+    // keys may be dup, dedup in encode
+    auto index = Encode(db, table, keys, ts);
     if (index.empty()) {
-        LOG(WARNING) << "index encode failed for table " << table;
-        return false;
+        LOG(WARNING) << "index encode failed for table " << db << "." << table;
+        return;
     }
 
     if (index_map_.find(index) != index_map_.end()) {
-        // TODO(hw): ttl merge
-        LOG(DFATAL) << "index existed in cache, can't handle it now";
-        return false;
+        // index id has unique idx, can't be dup. It's a weird case
+        LOG(DFATAL) << db << "." << table << " index " << index << " existed in cache";
+        return;
     }
-    DLOG(INFO) << "create index with unset ttl: " << index;
 
     // default TTLSt is abs and ttl=0, rows will never expire.
     // default TTLSt debug string is {}, but if we get, they will be the default values.
-    index_map_[index] = new common::TTLSt;
-    latest_record_ = index;
-    return true;
+    auto* ttl = new common::TTLSt;
+
+    if (expr_node != nullptr) {
+        switch (expr_node->GetOpType()) {
+            case hybridse::vm::kPhysicalOpRequestUnion: {
+                auto ru = expr_node->GetAsOrNull<hybridse::vm::PhysicalRequestUnionNode>();
+                UpdateTTLByWindow(ru->window(), ttl);
+                break;
+            }
+            case hybridse::vm::kPhysicalOpProject: {
+                auto ru = expr_node->GetAsOrNull<hybridse::vm::PhysicalProjectNode>();
+                if (ru != nullptr && ru->project_type_ == hybridse::vm::ProjectType::kWindowAggregation) {
+                    auto win_project = ru->GetAsOrNull<hybridse::vm::PhysicalWindowAggrerationNode>();
+                    UpdateTTLByWindow(win_project->window_, ttl);
+                }
+                break;
+            }
+            case hybridse::vm::kPhysicalOpRequestJoin: {
+                auto join_node = expr_node->GetAsOrNull<hybridse::vm::PhysicalRequestJoinNode>();
+                if (join_node->join().join_type() == hybridse::node::JoinType::kJoinTypeLeft) {
+                    ttl->set_ttl_type(type::TTLType::kAbsoluteTime);
+                    ttl->set_abs_ttl(0);
+                }
+                break;
+            }
+            case hybridse::vm::kPhysicalOpJoin: {
+                auto join_node = expr_node->GetAsOrNull<hybridse::vm::PhysicalJoinNode>();
+                if (join_node->join().join_type() == hybridse::node::JoinType::kJoinTypeLeft) {
+                    ttl->set_ttl_type(type::TTLType::kAbsoluteTime);
+                    ttl->set_abs_ttl(0);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    index_map_[index] = ttl;
+
+    LOG(INFO) << "suggest creating index for " << db << "." << table << ": " << index << ", " << ttl->ShortDebugString();
 }
 
 int64_t AbsTTLConvert(int64_t time_ms, bool zero_eq_unbounded) {
@@ -498,7 +517,8 @@ int64_t LatTTLConvert(int64_t lat, bool zero_eq_unbounded) {
 
 // history_range_start == INT64_MIN: unbounded
 // history_range_start == 0: not unbounded
-// NOTICE: do not convert invalid range/rows start. It'll get 0 from `GetHistoryRangeStart`.
+// And after convert, 0 means unbounded, history_range_start 0 will be converted to 1
+// NOTICE: do not convert invalid range/rows start, it'll return 0 by `GetHistoryRangeStart`.
 int64_t AbsTTLConvert(int64_t history_range_start) {
     return history_range_start == INT64_MIN ? 0 : AbsTTLConvert(-1 * history_range_start, false);
 }
@@ -506,129 +526,121 @@ int64_t LatTTLConvert(int64_t history_rows_start) {
     return history_rows_start == INT64_MIN ? 0 : LatTTLConvert(-1 * history_rows_start, false);
 }
 
-bool IndexMapBuilder::UpdateIndex(const hybridse::vm::Range& range) {
-    if (latest_record_.empty() || index_map_.find(latest_record_) == index_map_.end()) {
-        LOG(DFATAL) << "want to update ttl status, but index is not created before";
-        return false;
-    }
-    // TODO(hw): it's better to check the ts col name
-    //  but range's column names may be renamed, needs schema context
-
-    if (!range.Valid()) {
-        DLOG(INFO) << "range is invalid, can't update ttl, still use the default ttl";
-        return true;
-    }
+void IndexMapBuilder::UpdateTTLByWindow(const hybridse::vm::WindowOp& window, common::TTLSt* ttl_st_ptr) {
+    auto& range = window.range();
 
     std::stringstream ss;
     range.frame()->Print(ss, "");
     DLOG(INFO) << "frame info: " << ss.str();
 
-    auto ttl_st_ptr = index_map_[latest_record_];
     auto frame = range.frame();
     auto type = frame->frame_type();
     switch (type) {
-        case hybridse::node::kFrameRows:
+        case hybridse::node::kFrameRows: {
             ttl_st_ptr->set_ttl_type(type::TTLType::kLatestTime);
             ttl_st_ptr->set_lat_ttl(LatTTLConvert(frame->GetHistoryRowsStart()));
             break;
+        }
         case hybridse::node::kFrameRange:
-        case hybridse::node::kFrameRowsRange:
+        case hybridse::node::kFrameRowsRange: {
             ttl_st_ptr->set_ttl_type(type::TTLType::kAbsoluteTime);
             ttl_st_ptr->set_abs_ttl(AbsTTLConvert(frame->GetHistoryRangeStart()));
             break;
-        case hybridse::node::kFrameRowsMergeRowsRange:
+        }
+        case hybridse::node::kFrameRowsMergeRowsRange: {
             // use abs and ttl, only >abs_ttl and > lat_ttl will be expired
             ttl_st_ptr->set_ttl_type(type::TTLType::kAbsAndLat);
             ttl_st_ptr->set_abs_ttl(AbsTTLConvert(frame->GetHistoryRangeStart()));
             ttl_st_ptr->set_lat_ttl(LatTTLConvert(frame->GetHistoryRowsStart()));
             break;
+        }
         default:
             LOG(WARNING) << "invalid type";
-            return false;
+            return;
     }
-
-    DLOG(INFO) << latest_record_ << " update ttl " << index_map_[latest_record_]->DebugString();
-    // to avoid double update
-    latest_record_.clear();
-    return true;
 }
 
-IndexMap IndexMapBuilder::ToMap() {
-    IndexMap result;
+MultiDBIndexMap IndexMapBuilder::ToMap() {
+    // index_map_ may have duplicated index, we need to merge them here(don't merge in CreateIndex for debug)
+    // <db, <table, <index_str, ColumnKey>>>
+    std::map<std::string, std::map<std::string, std::map<std::string, common::ColumnKey>>> tmp_map;
     for (auto& pair : index_map_) {
-        auto dec = Decode(pair.first);
-        // message owns the TTLSt
-        dec.second.set_allocated_ttl(pair.second);
-        result[dec.first].emplace_back(dec.second);
+        if (!pair.second->has_ttl_type()) {
+            pair.second->set_ttl_type(::openmldb::type::TTLType::kLatestTime);
+            pair.second->set_lat_ttl(1);
+        }
+        auto [db, table, idx_str, column_key] = Decode(pair.first);
+        DLOG(INFO) << "decode index '" << pair.first << "': " << db << " " << table << " " << idx_str << " "
+                   << column_key.ShortDebugString();
+        auto& idx_map_of_table = tmp_map[db][table];
+        auto iter = idx_map_of_table.find(idx_str);
+        if (iter != idx_map_of_table.end()) {
+            // dup index, ttl merge
+            TTLMerge(iter->second.ttl(), *pair.second, iter->second.mutable_ttl());
+        } else {
+            // message owns the TTLSt
+            column_key.set_allocated_ttl(pair.second);
+            idx_map_of_table.emplace(idx_str, column_key);
+        }
     }
+
+    MultiDBIndexMap result;
+    for (auto& db_map : tmp_map) {
+        auto& db = db_map.first;
+        for (auto& pair : db_map.second) {
+            auto& table = pair.first;
+            auto& idx_map_of_table = pair.second;
+            for (auto& idx_pair : idx_map_of_table) {
+                auto& column_key = idx_pair.second;
+                result[db][table].emplace_back(column_key);
+            }
+        }
+    }
+
     // TTLSt is owned by result now, index_map_ can't be reused
     index_map_.clear();
+    index_id_ = 0;
     return result;
 }
 
-std::string IndexMapBuilder::Encode(const std::string& table, const hybridse::node::ExprListNode* keys,
-                                    const hybridse::node::OrderByNode* ts, const SchemasContext* ctx) {
+std::string IndexMapBuilder::Encode(absl::string_view db, absl::string_view table, absl::Span<std::string const> keys,
+                                    absl::string_view ts) {
     // children are ColumnRefNode
-    auto cols = NormalizeColumns(table, keys->children_, ctx);
+    // dedup and sort keys
+    std::set<std::string> cols(keys.begin(), keys.end());
     if (cols.empty()) {
         return {};
     }
 
     std::stringstream ss;
-    ss << table << ":";
+    // we add a unique mark to avoid conflict with index name, leave the indexes with same name(ttl may be different)
+    // you should do merge later
+    ss << index_id_++ << UNIQ_MARK << db << TABLE_MARK << table << KEY_MARK;
     auto iter = cols.begin();
     ss << (*iter);
     iter++;
     for (; iter != cols.end(); iter++) {
-        ss << "," << (*iter);
+        ss << KEY_SEP << (*iter);
     }
-    ss << ";";
+    ss << TS_MARK;
+    if (!ts.empty()) {
+        ss << ts;
+    }
 
-    if (ts != nullptr && ts->order_expressions_ != nullptr) {
-        for (auto order : ts->order_expressions_->children_) {
-            auto cast = dynamic_cast<hybridse::node::OrderExpression*>(order);
-            if (cast->expr() != nullptr) {
-                auto res = NormalizeColumns(table, {const_cast<hybridse::node::ExprNode*>(cast->expr())}, ctx);
-                if (res.size() != 1 || res[0].empty()) {
-                    LOG(DFATAL) << "parse ts col from order node failed, " << cast->GetExprString();
-                }
-                ss << res[0];
-            }
-        }
-    }
     return ss.str();
 }
 
-std::vector<std::string> IndexMapBuilder::NormalizeColumns(const std::string& table,
-                                                           const std::vector<hybridse::node::ExprNode*>& nodes,
-                                                           const SchemasContext* ctx) {
-    if (table.empty() || nodes.empty()) {
-        return {};
-    }
-    std::vector<std::string> result;
-    for (auto& node : nodes) {
-        auto cast = hybridse::node::ColumnRefNode::CastFrom(node);
-        std::string name;
-        if (!ResolveColumnToSourceColumnName(cast, ctx, &name)) {
-            return {};
-        }
-        result.emplace_back(name);
-    }
-    // sort to avoid dup index
-    std::sort(result.begin(), result.end());
-    return result;
-}
-
 // ColumnKey in result doesn't set ttl
-std::pair<std::string, common::ColumnKey> IndexMapBuilder::Decode(const std::string& index_str) {
+std::tuple<std::string, std::string, std::string, common::ColumnKey> IndexMapBuilder::Decode(
+    const std::string& index_str) {
     if (index_str.empty()) {
         return {};
     }
 
-    auto key_sep = index_str.find(KEY_MARK);
-    auto table_name = index_str.substr(0, key_sep);
+    const auto [db_name, table_name] = GetTable(index_str);
 
     common::ColumnKey column_key;
+    auto key_sep = index_str.find(KEY_MARK);
     auto ts_sep = index_str.find(TS_MARK);
     auto keys_str = index_str.substr(key_sep + 1, ts_sep - key_sep - 1);
     // split keys
@@ -643,251 +655,120 @@ std::pair<std::string, common::ColumnKey> IndexMapBuilder::Decode(const std::str
     if (!ts_col.empty()) {
         column_key.set_ts_name(ts_col);
     }
-    return std::make_pair(table_name, column_key);
+    return std::make_tuple(db_name, table_name, index_str.substr(key_sep + 1), column_key);
 }
 
-bool GroupAndSortOptimizedParser::KeysOptimizedParse(const SchemasContext* root_schemas_ctx, PhysicalOpNode* in,
-                                                     Key* left_key, Key* index_key, Key* right_key, Sort* sort,
-                                                     PhysicalOpNode**) {
-    if (nullptr == left_key || nullptr == index_key || !left_key->ValidKey()) {
-        return false;
+// return merged result: return new if new is bigger, else return old
+google::protobuf::uint64 TTLValueMerge(google::protobuf::uint64 old_value, google::protobuf::uint64 new_value) {
+    google::protobuf::uint64 result = old_value;
+    // 0 is the max, means no ttl, don't update
+    // if old value != 0
+    if (old_value != 0 && (new_value == 0 || old_value < new_value)) {
+        result = new_value;
     }
+    return result;
+}
 
-    if (right_key != nullptr && !right_key->ValidKey()) {
-        return false;
+void TTLValueMerge(const common::TTLSt& old_ttl, const common::TTLSt& new_ttl, common::TTLSt* result) {
+    google::protobuf::uint64 tmp_result;
+    tmp_result = TTLValueMerge(old_ttl.abs_ttl(), new_ttl.abs_ttl());
+    result->set_abs_ttl(tmp_result);
+    tmp_result = TTLValueMerge(old_ttl.lat_ttl(), new_ttl.lat_ttl());
+    result->set_lat_ttl(tmp_result);
+}
+
+common::TTLSt stdTTL(const common::TTLSt& ttl) {
+    common::TTLSt result(ttl);
+    DCHECK(result.has_ttl_type() && result.ttl_type() != type::TTLType::kRelativeTime)
+        << "invalid ttl type" << ttl.ShortDebugString();
+    if (result.ttl_type() == type::TTLType::kAbsoluteTime) {
+        // if no lat ttl, set a default 0
+        DCHECK(!result.has_lat_ttl() || result.lat_ttl() == 0);
+        result.set_lat_ttl(0);
+    } else if (result.ttl_type() == type::TTLType::kLatestTime) {
+        // if no abs ttl, set a default 0
+        DCHECK(!result.has_abs_ttl() || result.abs_ttl() == 0);
+        result.set_abs_ttl(0);
+    } else if (result.ttl_type() == type::TTLType::kAbsAndLat) {
+        DCHECK(result.has_abs_ttl() && result.has_lat_ttl());
+        // if any one is 0, won't expire any data, just set abs 0
+        if (result.abs_ttl() == 0 || result.lat_ttl() == 0) {
+            result.set_abs_ttl(0);
+            result.set_lat_ttl(0);
+            result.set_ttl_type(type::TTLType::kAbsoluteTime);
+        }
+    } else if (result.ttl_type() == type::TTLType::kAbsOrLat) {
+        DCHECK(result.has_abs_ttl() && result.has_lat_ttl());
+        // if any one is 0, just use the another one, if both 0, set abs 0
+        if (result.lat_ttl() == 0) {
+            result.set_ttl_type(type::TTLType::kAbsoluteTime);
+        } else if (result.abs_ttl() == 0) {
+            result.set_ttl_type(type::TTLType::kLatestTime);
+        }
     }
+    return result;
+}
 
-    if (PhysicalOpType::kPhysicalOpDataProvider == in->GetOpType()) {
-        auto scan_op = dynamic_cast<hybridse::vm::PhysicalDataProviderNode*>(in);
-        // Do not optimize with Request DataProvider (no index has been provided)
-        if (DataProviderType::kProviderTypeRequest == scan_op->provider_type_) {
-            return false;
+bool TTLMerge(const common::TTLSt& old_ttl, const common::TTLSt& new_ttl, common::TTLSt* result) {
+    // TTLSt has type and two values, updated is complex, so we just check result==old_ttl in the end
+
+    // we should std type first, absorlat(10,0) -> abs(10)
+    // e.g. merge absorlat(1,0) and absorlat(0,2), we need to check the values, otherwise we'll get absorlat(0,0), it's
+    // too large and if no abs when type is lat, just set a abs 0, to make compare simple(no need to check has_xxx_ttl)
+    auto left = stdTTL(old_ttl);
+    auto right = stdTTL(new_ttl);
+    using type::TTLType;
+    // complex ttl(absandlat or absorlat) won't have ttl value 0, it has been converted to simple ttl
+    // merge case 1. same type, just merge values(0 means max)
+    // merge case 2. different type
+    if (left.ttl_type() == right.ttl_type()) {
+        // it's ok to merge both abs and lat ttl value even type is only abs or lat, just 0 merge 0
+        result->set_ttl_type(left.ttl_type());
+        TTLValueMerge(left, right, result);
+    } else {
+        // old type != new type, and absandlat or absorlat won't have ttl value 0
+        // swap first, try to make left type is complex type or (abs + lat)
+        if (right.ttl_type() == TTLType::kAbsAndLat ||
+            (right.ttl_type() == TTLType::kAbsOrLat && left.ttl_type() != TTLType::kAbsAndLat)) {
+            std::swap(left, right);
+        }
+        if (left.ttl_type() == TTLType::kLatestTime && right.ttl_type() == TTLType::kAbsoluteTime) {
+            std::swap(left, right);
         }
 
-        if (DataProviderType::kProviderTypeTable == scan_op->provider_type_ ||
-            DataProviderType::kProviderTypePartition == scan_op->provider_type_) {
-            const hybridse::node::ExprListNode* right_partition =
-                right_key == nullptr ? left_key->keys() : right_key->keys();
-
-            size_t key_num = right_partition->GetChildNum();
-            std::vector<bool> bitmap(key_num, false);
-            hybridse::node::ExprListNode order_values;
-
-            if (DataProviderType::kProviderTypeTable == scan_op->provider_type_) {
-                // Apply key columns and order column optimization with all indexes binding to
-                // scan_op->table_handler_ Return false if fail to find an appropriate index
-                auto groups = right_partition;
-                auto order = (nullptr == sort ? nullptr : sort->orders_);
-                DLOG(INFO) << "keys and order optimized: keys=" << hybridse::node::ExprString(groups)
-                           << ", order=" << (order == nullptr ? "null" : hybridse::node::ExprString(order))
-                           << " for table " << scan_op->table_handler_->GetName();
-
-                // columns in groups or order, may be renamed
-
-                index_map_builder_.CreateIndex(scan_op->table_handler_->GetName(), groups, order, root_schemas_ctx);
-                // parser won't create partition_op
-                return true;
+        if (left.ttl_type() == TTLType::kAbsAndLat) {
+            // 3 cases
+            // absandlat(x,y)+abs(z), absandlat(x,y)+abs(0): don't merge lat(cuz abs type lat is 0), use absandlat's
+            // lat. absandlat(x,y)+lat(z), absandlat(x,y)+lat(0): the same absandlat(x,y)+absorlat(k,j): we need to
+            // store more to avoid delete valid records, merge both. No 0 value, so don't worry about set too large
+            result->CopyFrom(left);
+            if (right.ttl_type() == TTLType::kAbsoluteTime) {
+                result->set_abs_ttl(TTLValueMerge(left.abs_ttl(), right.abs_ttl()));
+            } else if (right.ttl_type() == TTLType::kLatestTime) {
+                result->set_lat_ttl(TTLValueMerge(left.lat_ttl(), right.lat_ttl()));
             } else {
-                auto partition_op = dynamic_cast<hybridse::vm::PhysicalPartitionProviderNode*>(scan_op);
-                DCHECK(partition_op != nullptr);
-                auto index_name = partition_op->index_name_;
-                // Apply key columns and order column optimization with given index name
-                // Return false if given index do not match the keys and order column
-                // -- return false won't change index_name
-                LOG(WARNING) << "What if the index is not best index? Do we need to adjust index?";
-                return false;
+                DCHECK(right.ttl_type() == TTLType::kAbsOrLat);
+                TTLValueMerge(left, right, result);
             }
-        }
-    } else if (PhysicalOpType::kPhysicalOpSimpleProject == in->GetOpType()) {
-        auto simple_project = dynamic_cast<hybridse::vm::PhysicalSimpleProjectNode*>(in);
-        PhysicalOpNode* new_depend;
-        return KeysOptimizedParse(root_schemas_ctx, simple_project->producers()[0], left_key, index_key, right_key,
-                                  sort, &new_depend);
-
-    } else if (PhysicalOpType::kPhysicalOpRename == in->GetOpType()) {
-        PhysicalOpNode* new_depend;
-        return KeysOptimizedParse(root_schemas_ctx, in->producers()[0], left_key, index_key, right_key, sort,
-                                  &new_depend);
-    }
-    return false;
-}
-
-std::vector<PhysicalOpNode*> GroupAndSortOptimizedParser::InitJoinList(
-    hybridse::vm::PhysicalWindowAggrerationNode* op) {
-    std::vector<PhysicalOpNode*> joined_op_list;
-    auto& window_joins = op->window_joins_.window_joins();
-    PhysicalOpNode* cur = op->GetProducer(0);
-    for (auto& pair : window_joins) {
-        auto joined = new hybridse::vm::PhysicalJoinNode(cur, pair.first, pair.second);
-        joined_op_list.push_back(joined);
-        cur = joined;
-    }
-    return joined_op_list;
-}
-
-void GroupAndSortOptimizedParser::TransformParse(PhysicalOpNode* in) {
-    switch (in->GetOpType()) {
-        case PhysicalOpType::kPhysicalOpGroupBy: {
-            auto group_op = dynamic_cast<hybridse::vm::PhysicalGroupNode*>(in);
-            DCHECK(group_op);
-            PhysicalOpNode* new_producer;
-            if (GroupOptimizedParse(group_op->schemas_ctx(), group_op->GetProducer(0), &group_op->group_,
-                                    &new_producer)) {
-                // no orders->no sort->no ttl info
-                DLOG(INFO) << "ttl won't update by node:\n" << group_op->GetTreeString();
-            }
-            break;
-        }
-        case PhysicalOpType::kPhysicalOpProject: {
-            auto project_op = dynamic_cast<hybridse::vm::PhysicalProjectNode*>(in);
-            DCHECK(project_op);
-            if (hybridse::vm::ProjectType::kWindowAggregation == project_op->project_type_) {
-                auto window_agg_op = dynamic_cast<hybridse::vm::PhysicalWindowAggrerationNode*>(project_op);
-                CHECK_NOTNULL(window_agg_op);
-                PhysicalOpNode* input = window_agg_op->GetProducer(0);
-
-                PhysicalOpNode* new_producer;
-                if (!window_agg_op->instance_not_in_window()) {
-                    if (KeyAndOrderOptimizedParse(input->schemas_ctx(), input, &window_agg_op->window_.partition_,
-                                                  &window_agg_op->window_.sort_, &new_producer)) {
-                        index_map_builder_.UpdateIndex(window_agg_op->window_.range());
-                    }
-                }
-                // must prepare for window join column infer
-                auto& window_joins = window_agg_op->window_joins();
-                auto& window_unions = window_agg_op->window_unions();
-                auto joined_op_list = InitJoinList(window_agg_op);
-                if (!window_joins.Empty()) {
-                    size_t join_idx = 0;
-                    for (auto& window_join : window_joins.window_joins()) {
-                        PhysicalOpNode* cur_joined = joined_op_list[join_idx];
-
-                        PhysicalOpNode* new_join_right;
-                        if (JoinKeysOptimizedParse(cur_joined->schemas_ctx(), window_join.first, &window_join.second,
-                                                   &new_join_right)) {
-                            // no range info
-                            DLOG(INFO) << "ttl won't update by node:\n" << window_agg_op->GetTreeString();
-                        }
-                        join_idx += 1;
-                    }
-                }
-                // joined_op_list need to be deleted
-                for (auto& op : joined_op_list) {
-                    delete op;
-                }
-
-                if (!window_unions.Empty()) {
-                    for (auto& window_union : window_unions.window_unions_) {
-                        PhysicalOpNode* new_producer1;
-                        if (KeyAndOrderOptimizedParse(window_union.first->schemas_ctx(), window_union.first,
-                                                      &window_union.second.partition_, &window_union.second.sort_,
-                                                      &new_producer1)) {
-                            index_map_builder_.UpdateIndex(window_union.second.range());
-                        }
-                    }
-                }
-            }
-            break;
-        }
-        case PhysicalOpType::kPhysicalOpRequestUnion: {
-            auto union_op = dynamic_cast<hybridse::vm::PhysicalRequestUnionNode*>(in);
-            DCHECK(union_op);
-            PhysicalOpNode* new_producer;
-            if (!union_op->instance_not_in_window()) {
-                if (KeysAndOrderFilterOptimizedParse(union_op->schemas_ctx(), union_op->GetProducer(1),
-                                                     &union_op->window_.partition_, &union_op->window_.index_key_,
-                                                     &union_op->window_.sort_, &new_producer)) {
-                    index_map_builder_.UpdateIndex(union_op->window().range());
-                }
-            }
-
-            if (!union_op->window_unions().Empty()) {
-                for (auto& window_union : union_op->window_unions_.window_unions_) {
-                    PhysicalOpNode* new_producer1;
-                    auto& window = window_union.second;
-                    if (KeysAndOrderFilterOptimizedParse(window_union.first->schemas_ctx(), window_union.first,
-                                                         &window.partition_, &window.index_key_, &window.sort_,
-                                                         &new_producer1)) {
-                        index_map_builder_.UpdateIndex(window.range());
-                    }
-                }
-            }
-            break;
-        }
-        case PhysicalOpType::kPhysicalOpRequestJoin: {
-            auto* join_op = dynamic_cast<hybridse::vm::PhysicalRequestJoinNode*>(in);
-            DCHECK(join_op);
-            PhysicalOpNode* new_producer;
-            // Optimized Right Table Partition
-            if (JoinKeysOptimizedParse(join_op->schemas_ctx(), join_op->GetProducer(1), &join_op->join_,
-                                       &new_producer)) {
-                // no range info
-                DLOG(INFO) << "ttl won't update by node:\n" << join_op->GetTreeString();
-            }
-
-            break;
-        }
-        case PhysicalOpType::kPhysicalOpJoin: {
-            auto* join_op = dynamic_cast<hybridse::vm::PhysicalJoinNode*>(in);
-            DCHECK(join_op);
-            PhysicalOpNode* new_producer;
-            // Optimized Right Table Partition
-            if (JoinKeysOptimizedParse(join_op->schemas_ctx(), join_op->GetProducer(1), &join_op->join_,
-                                       &new_producer)) {
-                // no range info
-                DLOG(INFO) << "ttl won't update by node:\n" << join_op->GetTreeString();
-            }
-
-            break;
-        }
-        case PhysicalOpType::kPhysicalOpFilter: {
-            auto* filter_op = dynamic_cast<hybridse::vm::PhysicalFilterNode*>(in);
-            DCHECK(filter_op);
-            PhysicalOpNode* new_producer;
-            if (FilterOptimizedParse(filter_op->schemas_ctx(), filter_op->GetProducer(0), &filter_op->filter_,
-                                     &new_producer)) {
-                // no range info
-                DLOG(INFO) << "ttl won't update by node:\n" << filter_op->GetTreeString();
-            }
-        }
-        default: {
-            break;
+        } else if (left.ttl_type() == TTLType::kAbsOrLat) {
+            // 2 cases
+            // absorlat + abs/lat = lat/abs, leave the simple type, ignore another one
+            // merged result will be std, don't worry about the new value of ignored type
+            DCHECK(right.ttl_type() == TTLType::kAbsoluteTime || right.ttl_type() == TTLType::kLatestTime);
+            result->set_ttl_type(right.ttl_type());
+            TTLValueMerge(left, right, result);
+        } else {
+            DCHECK(left.ttl_type() == TTLType::kAbsoluteTime && right.ttl_type() == TTLType::kLatestTime);
+            // 1 case
+            // abs + lat -> absandlat: set type, merge can't use lat ttl(0) if type is abs, so custom merge
+            result->set_ttl_type(TTLType::kAbsAndLat);
+            result->set_abs_ttl(left.abs_ttl());
+            result->set_lat_ttl(right.lat_ttl());
         }
     }
-}
+    // after merge, may get complex ttl with 0
+    result->CopyFrom(stdTTL(*result));
 
-bool ResolveColumnToSourceColumnName(const hybridse::node::ColumnRefNode* col, const SchemasContext* schemas_ctx,
-                                     std::string* source_name) {
-    // use detailed column resolve utility
-    size_t column_id;
-    int path_idx;
-    size_t child_column_id;
-    size_t source_column_id;
-    const PhysicalOpNode* source;
-    hybridse::base::Status status =
-        schemas_ctx->ResolveColumnID(col->GetDBName(), col->GetRelationName(), col->GetColumnName(), &column_id,
-                                     &path_idx, &child_column_id, &source_column_id, &source);
-
-    // try loose the relation
-    if (!status.isOK() && !col->GetRelationName().empty()) {
-        status = schemas_ctx->ResolveColumnID("", "", col->GetColumnName(), &column_id, &path_idx, &child_column_id,
-                                              &source_column_id, &source);
-    }
-
-    if (!status.isOK()) {
-        LOG(WARNING) << "Illegal index column: " << col->GetExprString();
-        return false;
-    }
-    if (source == nullptr || source->GetOpType() != PhysicalOpType::kPhysicalOpDataProvider) {
-        LOG(WARNING) << "Index column is not from any source table: " << col->GetExprString();
-        return false;
-    }
-    status = source->schemas_ctx()->ResolveColumnNameByID(source_column_id, source_name);
-    if (!status.isOK()) {
-        LOG(WARNING) << "Illegal source column id #" << source_column_id << " for index column "
-                     << col->GetExprString();
-        return false;
-    }
-    return true;
+    return !google::protobuf::util::MessageDifferencer::Equals(old_ttl, *result);
 }
 }  // namespace openmldb::base

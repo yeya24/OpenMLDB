@@ -131,7 +131,6 @@ TEST_P(TableIteratorTest, latest) {
     table_meta.set_tid(id);
     table_meta.set_pid(1);
     table_meta.set_mode(::openmldb::api::TableMode::kTableLeader);
-    table_meta.set_format_version(1);
     table_meta.set_storage_mode(storageMode);
     codec::SchemaCodec::SetColumnDesc(table_meta.add_column_desc(), "card", ::openmldb::type::kString);
     codec::SchemaCodec::SetColumnDesc(table_meta.add_column_desc(), "mcc", ::openmldb::type::kString);
@@ -153,7 +152,8 @@ TEST_P(TableIteratorTest, latest) {
             dim->set_key(key);
             std::string value;
             ASSERT_EQ(0, codec.EncodeRow(row, &value));
-            table->Put(0, value, request.dimensions());
+            auto st = table->Put(0, value, request.dimensions());
+            ASSERT_TRUE(st.ok()) << st.ToString();
         }
     }
     ::hybridse::vm::WindowIterator* it = table->NewWindowIterator(0);
@@ -195,7 +195,6 @@ TEST_P(TableIteratorTest, smoketest2) {
     table_meta.set_tid(id);
     table_meta.set_pid(1);
     table_meta.set_mode(::openmldb::api::TableMode::kTableLeader);
-    table_meta.set_format_version(1);
     table_meta.set_key_entry_max_height(8);
     table_meta.set_seg_cnt(1);
     table_meta.set_storage_mode(storageMode);
@@ -218,7 +217,8 @@ TEST_P(TableIteratorTest, smoketest2) {
             dim->set_key(key);
             std::string value;
             ASSERT_EQ(0, codec.EncodeRow(row, &value));
-            table->Put(0, value, request.dimensions());
+            auto st = table->Put(0, value, request.dimensions());
+            ASSERT_TRUE(st.ok()) << st.ToString();
         }
     }
     ::hybridse::vm::WindowIterator* it = table->NewWindowIterator(0);
@@ -363,7 +363,6 @@ TEST_P(TableIteratorTest, releaseKeyIterator) {
     table_meta.set_tid(id);
     table_meta.set_pid(1);
     table_meta.set_mode(::openmldb::api::TableMode::kTableLeader);
-    table_meta.set_format_version(1);
     table_meta.set_key_entry_max_height(8);
     table_meta.set_seg_cnt(1);
     table_meta.set_storage_mode(storageMode);
@@ -386,7 +385,8 @@ TEST_P(TableIteratorTest, releaseKeyIterator) {
             dim->set_key(key);
             std::string value;
             ASSERT_EQ(0, codec.EncodeRow(row, &value));
-            table->Put(0, value, request.dimensions());
+            auto st = table->Put(0, value, request.dimensions());
+            ASSERT_TRUE(st.ok()) << st.ToString();
         }
     }
 
@@ -410,7 +410,6 @@ TEST_P(TableIteratorTest, SeekNonExistent) {
     table_meta.set_tid(id);
     table_meta.set_pid(1);
     table_meta.set_mode(::openmldb::api::TableMode::kTableLeader);
-    table_meta.set_format_version(1);
     table_meta.set_key_entry_max_height(8);
     table_meta.set_seg_cnt(1);
     table_meta.set_storage_mode(storageMode);
@@ -433,7 +432,8 @@ TEST_P(TableIteratorTest, SeekNonExistent) {
             dim->set_key(key);
             std::string value;
             ASSERT_EQ(0, codec.EncodeRow(row, &value));
-            table->Put(0, value, request.dimensions());
+            auto st = table->Put(0, value, request.dimensions());
+            ASSERT_TRUE(st.ok()) << st.ToString();
         }
     }
 
@@ -454,7 +454,7 @@ TEST_P(TableIteratorTest, SeekNonExistent) {
     ASSERT_EQ(0, now - wit->GetKey());
 }
 
-INSTANTIATE_TEST_CASE_P(TestMemAndHDD, TableIteratorTest,
+INSTANTIATE_TEST_SUITE_P(TestMemAndHDD, TableIteratorTest,
                         ::testing::Values(::openmldb::common::kMemory, ::openmldb::common::kHDD));
 
 }  // namespace storage

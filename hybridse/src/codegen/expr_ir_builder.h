@@ -17,24 +17,12 @@
 #ifndef HYBRIDSE_SRC_CODEGEN_EXPR_IR_BUILDER_H_
 #define HYBRIDSE_SRC_CODEGEN_EXPR_IR_BUILDER_H_
 
-#include <map>
-#include <memory>
 #include <string>
 #include <vector>
+
 #include "base/fe_status.h"
-#include "codegen/arithmetic_expr_ir_builder.h"
-#include "codegen/buf_ir_builder.h"
-#include "codegen/predicate_expr_ir_builder.h"
-#include "codegen/row_ir_builder.h"
-#include "codegen/scope_var.h"
-#include "codegen/variable_ir_builder.h"
-#include "codegen/window_ir_builder.h"
-#include "llvm/IR/IRBuilder.h"
-#include "node/node_manager.h"
+#include "codegen/context.h"
 #include "node/sql_node.h"
-#include "node/type_node.h"
-#include "passes/resolve_fn_and_attrs.h"
-#include "vm/schemas_context.h"
 
 namespace hybridse {
 namespace codegen {
@@ -107,14 +95,25 @@ class ExprIRBuilder {
 
     Status BuildEscapeExpr(const ::hybridse::node::EscapedExpr* node, NativeValue* output);
 
+    Status BuildRLikeExprAsUdf(const ::hybridse::node::BinaryExpr* node, const std::string& name,
+                               const NativeValue& lhs, const NativeValue& rhs, NativeValue* output);
+
     Status ExtractSliceFromRow(const NativeValue& input_value, const int schema_idx, ::llvm::Value** slice_ptr,
                                ::llvm::Value** slice_size);
     Status GetFunction(const std::string& col, const std::vector<const node::TypeNode*>& generic_types,
                       ::llvm::Function** output);
 
+    Status BuildArrayExpr(const ::hybridse::node::ArrayExpr* node, NativeValue* output);
+
+    Status BuildArrayElement(const ::hybridse::node::ArrayElementExpr*, NativeValue*);
+
  private:
     CodeGenContext* ctx_;
+
+    // window frame node
     const node::FrameNode* frame_ = nullptr;
+
+    // ExprIdNode definition of frame
     node::ExprNode* frame_arg_ = nullptr;
 };
 }  // namespace codegen

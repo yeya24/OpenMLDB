@@ -29,6 +29,8 @@
 namespace hybridse {
 namespace node {
 
+class WithClauseEntryPlanNode;
+
 std::string NameOfPlanNodeType(const PlanType &type);
 
 class PlanNode : public NodeBase<PlanNode> {
@@ -116,23 +118,20 @@ class RenamePlanNode : public UnaryPlanNode {
 
     const std::string table_;
 };
+
+// Refer to a physical table or a CTE entry in with clause
 class TablePlanNode : public LeafPlanNode {
  public:
     TablePlanNode(const std::string &db, const std::string &table)
-        : LeafPlanNode(kPlanTypeTable), db_(db), table_(table), is_primary_(false) {}
+        : LeafPlanNode(kPlanTypeTable), db_(db), table_(table) {}
     void Print(std::ostream &output, const std::string &org_tab) const override;
-    virtual bool Equals(const PlanNode *that) const;
-    const bool IsPrimary() const { return is_primary_; }
-    void SetIsPrimary(bool is_primary) { is_primary_ = is_primary; }
+    bool Equals(const PlanNode *that) const override;
     const std::string GetPathString() const {
         return db_.empty() ? table_ : db_ + "." + table_;
     }
 
     const std::string db_;
     const std::string table_;
-
- private:
-    bool is_primary_;
 };
 
 class DistinctPlanNode : public UnaryPlanNode {
@@ -150,16 +149,6 @@ class JoinPlanNode : public BinaryPlanNode {
     const JoinType join_type_;
     const OrderByNode *orders_;
     const ExprNode *condition_;
-};
-
-class UnionPlanNode : public BinaryPlanNode {
- public:
-    UnionPlanNode(PlanNode *left, PlanNode *right, bool is_all)
-        : BinaryPlanNode(kPlanTypeUnion, left, right), is_all(is_all) {}
-    void Print(std::ostream &output, const std::string &org_tab) const override;
-    virtual bool Equals(const PlanNode *that) const;
-    const bool is_all;
-    std::shared_ptr<OptionsMap> config_options_;
 };
 
 class CrossProductPlanNode : public BinaryPlanNode {
@@ -185,13 +174,71 @@ class GroupPlanNode : public UnaryPlanNode {
     const ExprListNode *by_list_;
 };
 
+class ProjectPlanNode : public UnaryPlanNode {
+ public:
+    explicit ProjectPlanNode(PlanNode *node, const std::string &table, const PlanNodeList &project_list_vec,
+                             const std::vector<std::pair<uint32_t, uint32_t>> &pos_mapping)
+        : UnaryPlanNode(node, kPlanTypeProject),
+          table_(table),
+          project_list_vec_(project_list_vec),
+          pos_mapping_(pos_mapping) {}
+    void Print(std::ostream &output, const std::string &org_tab) const;
+    virtual bool Equals(const PlanNode *node) const;
+
+    const std::string table_;
+    const PlanNodeList project_list_vec_;
+    // final output column index -> (index of of project_list_vec_, index of project of that project list node)
+    const std::vector<std::pair<uint32_t, uint32_t>> pos_mapping_;
+    bool IsSimpleProjectPlan();
+};
+
 class QueryPlanNode : public UnaryPlanNode {
  public:
+    QueryPlanNode() : UnaryPlanNode(kPlanTypeQuery) {}
     explicit QueryPlanNode(PlanNode *node) : UnaryPlanNode(node, kPlanTypeQuery) {}
     ~QueryPlanNode() {}
     void Print(std::ostream &output, const std::string &org_tab) const override;
-    virtual bool Equals(const PlanNode *node) const;
+    bool Equals(const PlanNode *node) const override;
+
+    absl::Span<WithClauseEntryPlanNode*> with_clauses_;
     std::shared_ptr<OptionsMap> config_options_;
+};
+
+class SetOperationPlanNode : public MultiChildPlanNode {
+ public:
+    SetOperationPlanNode(SetOperationType type, absl::Span<QueryPlanNode *> input, bool distinct)
+        : MultiChildPlanNode(kPlanTypeSetOperation), op_type_(type), inputs_(input), distinct_(distinct) {
+      for (auto n : input) {
+         AddChild(n);
+      }
+    }
+    ~SetOperationPlanNode() override {}
+
+    const absl::Span<const QueryPlanNode *const> &inputs() const { return inputs_; }
+    SetOperationType op_type() const { return op_type_; }
+    bool distinct() const { return distinct_; }
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    bool Equals(const PlanNode *that) const override;
+
+ private:
+    SetOperationType op_type_;
+    absl::Span<const QueryPlanNode *const> inputs_;
+    bool distinct_ = false;
+};
+
+class WithClauseEntryPlanNode : public UnaryPlanNode {
+ public:
+    WithClauseEntryPlanNode(std::string alias, QueryPlanNode *query)
+        : UnaryPlanNode(query, kPlanTypeWithClauseEntry), alias_(alias), query_(query) {}
+
+    ~WithClauseEntryPlanNode() override {}
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    bool Equals(const PlanNode *node) const override;
+
+    std::string alias_;
+    QueryPlanNode *query_;
 };
 
 class FilterPlanNode : public UnaryPlanNode {
@@ -200,7 +247,7 @@ class FilterPlanNode : public UnaryPlanNode {
         : UnaryPlanNode(node, kPlanTypeFilter), condition_(condition) {}
     ~FilterPlanNode() {}
     void Print(std::ostream &output, const std::string &org_tab) const override;
-    virtual bool Equals(const PlanNode *node) const;
+    bool Equals(const PlanNode *node) const override;
     const ExprNode *condition_;
 };
 
@@ -211,7 +258,7 @@ class LimitPlanNode : public UnaryPlanNode {
     ~LimitPlanNode() {}
     const int GetLimitCnt() const { return limit_cnt_; }
     void Print(std::ostream &output, const std::string &org_tab) const override;
-    virtual bool Equals(const PlanNode *node) const;
+    bool Equals(const PlanNode *node) const override;
     const int32_t limit_cnt_;
 };
 
@@ -273,8 +320,8 @@ class WindowPlanNode : public LeafPlanNode {
     void set_instance_not_in_window(bool instance_not_in_window) { instance_not_in_window_ = instance_not_in_window; }
     const bool exclude_current_time() const { return exclude_current_time_; }
     void set_exclude_current_time(bool exclude_current_time) { exclude_current_time_ = exclude_current_time; }
-    bool exclude_current_row() const { return exclude_current_row_; }
-    void set_exclude_current_row(bool flag) { exclude_current_row_ = flag; }
+
+    bool exclude_current_row() const { return frame_node_ ? frame_node_->exclude_current_row_ : false; }
     virtual bool Equals(const PlanNode *node) const;
 
  private:
@@ -286,7 +333,6 @@ class WindowPlanNode : public LeafPlanNode {
     PlanNodeList union_tables_;
 
     bool exclude_current_time_ = false;
-    bool exclude_current_row_ = false;
     bool instance_not_in_window_ = false;
 };
 
@@ -342,23 +388,6 @@ class ProjectListNode : public LeafPlanNode {
     const WindowPlanNode *w_ptr_;
     const ExprNode* having_condition_;
     PlanNodeList projects_;
-};
-
-class ProjectPlanNode : public UnaryPlanNode {
- public:
-    explicit ProjectPlanNode(PlanNode *node, const std::string &table, const PlanNodeList &project_list_vec,
-                             const std::vector<std::pair<uint32_t, uint32_t>> &pos_mapping)
-        : UnaryPlanNode(node, kPlanTypeProject),
-          table_(table),
-          project_list_vec_(project_list_vec),
-          pos_mapping_(pos_mapping) {}
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    virtual bool Equals(const PlanNode *node) const;
-
-    const std::string table_;
-    const PlanNodeList project_list_vec_;
-    const std::vector<std::pair<uint32_t, uint32_t>> pos_mapping_;
-    bool IsSimpleProjectPlan();
 };
 
 class CreatePlanNode : public LeafPlanNode {
@@ -433,6 +462,25 @@ class CreatePlanNode : public LeafPlanNode {
 
     void Print(std::ostream &output, const std::string &org_tab) const;
 
+    std::shared_ptr<node::CreateTableLikeClause> like_clause_;
+
+    // TODO(tobe): Remove these if Java can read like_clause_ with smart pointer
+    node::CreateTableLikeClause::LikeKind GetLikeKind() const {
+        if (like_clause_ == nullptr) {
+            LOG(ERROR) << "like_clause_ is null, return data may be unexpected";
+            return node::CreateTableLikeClause::LikeKind::PARQUET;
+        }
+        return like_clause_->kind_;
+    }
+
+    std::string GetLikePath() const {
+        if (like_clause_ == nullptr) {
+            LOG(ERROR) << "like_clause_ is null, return data may be unexpected";
+            return "";
+        }
+        return like_clause_->path_;
+    }
+
  private:
     std::string database_;
     std::string table_name_;
@@ -472,6 +520,22 @@ class CmdPlanNode : public LeafPlanNode {
     std::vector<std::string> args_;
     bool if_not_exist_ = false;
     bool if_exist_ = false;
+};
+
+class ShowPlanNode : public LeafPlanNode {
+ public:
+    ShowPlanNode(ShowStmtType show_type, const std::string& target, const std::string like)
+        : LeafPlanNode(kPlanTypeShow), show_type_(show_type), target_(target), like_str_(like) {}
+    const std::string& GetTarget() const { return target_; }
+    ShowStmtType GetShowType() const { return show_type_; }
+    const std::string& GetLikeStr() const { return like_str_; }
+    bool Equals(const PlanNode* that) const override;
+    void Print(std::ostream& output, const std::string& tab) const override;
+
+ private:
+    ShowStmtType show_type_;
+    std::string target_;
+    std::string like_str_;
 };
 
 class DeletePlanNode : public LeafPlanNode {
@@ -602,7 +666,7 @@ class LoadDataPlanNode : public LeafPlanNode {
     const std::string table_;
     // optional options for load data, e.g csv related options
     const std::shared_ptr<OptionsMap> options_;
-    // optinal config option for load data, to config offline job parameters
+    // optional config option for load data, to config offline job parameters
     const std::shared_ptr<OptionsMap> config_options_;
 };
 
@@ -658,6 +722,100 @@ class CreateIndexPlanNode : public LeafPlanNode {
     void Print(std::ostream &output, const std::string &orgTab) const;
     const CreateIndexNode *create_index_node_;
 };
+
+class CreateUserPlanNode : public LeafPlanNode {
+ public:
+    explicit CreateUserPlanNode(const std::string& name, bool if_not_exists, std::shared_ptr<OptionsMap> options)
+        : LeafPlanNode(kPlanTypeCreateUser), name_(name), if_not_exists_(if_not_exists), options_(options) {}
+    ~CreateUserPlanNode() = default;
+    void Print(std::ostream &output, const std::string &orgTab) const;
+    const std::string& Name() const { return name_; }
+    bool IfNotExists() const { return if_not_exists_; }
+    const std::shared_ptr<OptionsMap> Options() const { return options_; }
+
+ private:
+    const std::string name_;
+    const bool if_not_exists_ = false;
+    const std::shared_ptr<OptionsMap> options_;
+};
+
+class GrantPlanNode : public LeafPlanNode {
+ public:
+    explicit GrantPlanNode(std::optional<std::string> target_type, std::string database, std::string target,
+                           std::vector<std::string> privileges, bool is_all_privileges,
+                           std::vector<std::string> grantees, bool with_grant_option)
+        : LeafPlanNode(kPlanTypeGrant),
+          target_type_(target_type),
+          database_(database),
+          target_(target),
+          privileges_(privileges),
+          is_all_privileges_(is_all_privileges),
+          grantees_(grantees),
+          with_grant_option_(with_grant_option) {}
+    ~GrantPlanNode() = default;
+    const std::vector<std::string> Privileges() const { return privileges_; }
+    const std::vector<std::string> Grantees() const { return grantees_; }
+    const std::string Database() const { return database_; }
+    const std::string Target() const { return target_; }
+    const std::optional<std::string> TargetType() const { return target_type_; }
+    const bool IsAllPrivileges() const { return is_all_privileges_; }
+    const bool WithGrantOption() const { return with_grant_option_; }
+
+ private:
+    std::optional<std::string> target_type_;
+    std::string database_;
+    std::string target_;
+    std::vector<std::string> privileges_;
+    bool is_all_privileges_;
+    std::vector<std::string> grantees_;
+    bool with_grant_option_;
+};
+
+class RevokePlanNode : public LeafPlanNode {
+ public:
+    explicit RevokePlanNode(std::optional<std::string> target_type, std::string database, std::string target,
+                            std::vector<std::string> privileges, bool is_all_privileges,
+                            std::vector<std::string> grantees)
+        : LeafPlanNode(kPlanTypeRevoke),
+          target_type_(target_type),
+          database_(database),
+          target_(target),
+          privileges_(privileges),
+          is_all_privileges_(is_all_privileges),
+          grantees_(grantees) {}
+    ~RevokePlanNode() = default;
+    const std::vector<std::string> Privileges() const { return privileges_; }
+    const std::vector<std::string> Grantees() const { return grantees_; }
+    const std::string Database() const { return database_; }
+    const std::string Target() const { return target_; }
+    const std::optional<std::string> TargetType() const { return target_type_; }
+    const bool IsAllPrivileges() const { return is_all_privileges_; }
+
+ private:
+    std::optional<std::string> target_type_;
+    std::string database_;
+    std::string target_;
+    std::vector<std::string> privileges_;
+    bool is_all_privileges_;
+    std::vector<std::string> grantees_;
+};
+
+class AlterUserPlanNode : public LeafPlanNode {
+ public:
+    explicit AlterUserPlanNode(const std::string& name, bool if_exists, std::shared_ptr<OptionsMap> options)
+        : LeafPlanNode(kPlanTypeAlterUser), name_(name), if_exists_(if_exists), options_(options) {}
+    ~AlterUserPlanNode() = default;
+    void Print(std::ostream &output, const std::string &orgTab) const;
+    const std::string& Name() const { return name_; }
+    bool IfExists() const { return if_exists_; }
+    const std::shared_ptr<OptionsMap> Options() const { return options_; }
+
+ private:
+    const std::string name_;
+    const bool if_exists_ = false;
+    const std::shared_ptr<OptionsMap> options_;
+};
+
 class CreateProcedurePlanNode : public MultiChildPlanNode {
  public:
     CreateProcedurePlanNode(const std::string &sp_name, const NodePointVector &input_parameter_list,
@@ -696,6 +854,36 @@ class CreateProcedurePlanNode : public MultiChildPlanNode {
     std::string sp_name_;
     NodePointVector input_parameter_list_;
     PlanNodeList inner_plan_node_list_;
+};
+
+class AlterTableStmtPlanNode : public LeafPlanNode {
+ public:
+    AlterTableStmtPlanNode(absl::string_view db, absl::string_view table,
+                           const std::vector<const AlterActionBase *> &actions)
+        : LeafPlanNode(kPlanTypeAlterTable), db_(db), table_(table), actions_(actions) {}
+    ~AlterTableStmtPlanNode() override {}
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+
+    absl::string_view db_;
+    absl::string_view table_;
+    std::vector<const AlterActionBase *> actions_;
+};
+
+class CallStmtPlan : public LeafPlanNode {
+ public:
+    CallStmtPlan(const std::vector<std::string> names, const std::vector<ExprNode *> args)
+        : LeafPlanNode(kPlanTypeCallStmt), procedure_name_(names), arguments_(args) {}
+    ~CallStmtPlan() override {}
+
+    const std::vector<std::string> &procedure_name() const { return procedure_name_; }
+    const std::vector<ExprNode *> &arguments() const { return arguments_; }
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+
+ private:
+    const std::vector<std::string> procedure_name_;
+    const std::vector<ExprNode*> arguments_;
 };
 
 bool PlanEquals(const PlanNode *left, const PlanNode *right);

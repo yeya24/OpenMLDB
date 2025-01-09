@@ -28,6 +28,26 @@
 // Enable protobuf interfaces
 %include "swig_library/java/protobuf.i"
 %protobuf(openmldb::nameserver::TableInfo, com._4paradigm.openmldb.proto.NS.TableInfo);
+
+// refer https://github.com/swig/swig/blob/master/Lib/java/various.i
+
+%typemap(jni) hybridse::sdk::ByteArrayPtr "jbyteArray"
+%typemap(jtype) hybridse::sdk::ByteArrayPtr "byte[]"
+%typemap(jstype) hybridse::sdk::ByteArrayPtr "byte[]"
+%typemap(in) hybridse::sdk::ByteArrayPtr {
+  $1 = (hybridse::sdk::ByteArrayPtr) JCALL2(GetByteArrayElements, jenv, $input, 0);
+}
+
+%typemap(argout) hybridse::sdk::ByteArrayPtr {
+  JCALL3(ReleaseByteArrayElements, jenv, $input, (jbyte *) $1, 0);
+}
+
+%typemap(javain) hybridse::sdk::ByteArrayPtr "$javainput"
+%typemap(javaout) hybridse::sdk::ByteArrayPtr "{ return $jnicall; }"
+
+/* Prevent default freearg typemap from being used */
+%typemap(freearg) hybridse::sdk::ByteArrayPtr ""
+
 #endif
 
 %shared_ptr(hybridse::sdk::ResultSet);
@@ -44,17 +64,23 @@
 %shared_ptr(hybridse::sdk::ProcedureInfo);
 %shared_ptr(openmldb::sdk::QueryFuture);
 %shared_ptr(openmldb::sdk::TableReader);
+%shared_ptr(hybridse::node::CreateTableLikeClause);
+%shared_ptr(openmldb::sdk::DefaultValueContainer);
 %template(VectorUint32) std::vector<uint32_t>;
 %template(VectorString) std::vector<std::string>;
 
+%shared_ptr(openmldb::sdk::DAGNode);
 %{
+#include "sdk/options.h"
 #include "sdk/sql_router.h"
 #include "sdk/result_set.h"
+#include "sdk/base_schema.h"
 #include "sdk/base.h"
 #include "sdk/sql_request_row.h"
 #include "sdk/sql_insert_row.h"
 #include "sdk/sql_delete_row.h"
 #include "sdk/table_reader.h"
+#include "sdk/internal/system_variable.h"
 
 using hybridse::sdk::Schema;
 using hybridse::sdk::ColumnTypes;
@@ -71,9 +97,12 @@ using openmldb::sdk::ExplainInfo;
 using hybridse::sdk::ProcedureInfo;
 using openmldb::sdk::QueryFuture;
 using openmldb::sdk::TableReader;
+using openmldb::sdk::DefaultValueContainer;
 %}
 
+%include "sdk/options.h"
 %include "sdk/sql_router.h"
+%include "sdk/base_schema.h"
 %include "sdk/base.h"
 %include "sdk/result_set.h"
 %include "sdk/sql_request_row.h"
@@ -85,3 +114,12 @@ using openmldb::sdk::TableReader;
 %template(ColumnDescVector) std::vector<std::pair<std::string, hybridse::sdk::DataType>>;
 %template(TableColumnDescPair) std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>;
 %template(TableColumnDescPairVector) std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>;
+
+%template(DBTableColumnDescPair) std::pair<std::string, std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>;
+// vector<db, vector<table, vector<column, type>>>
+%template(DBTableColumnDescPairVector) std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::vector<std::pair<std::string, hybridse::sdk::DataType>>>>>>;
+
+%template(DBTable) std::pair<std::string, std::string>;
+%template(DBTableVector) std::vector<std::pair<std::string, std::string>>;
+
+%template(DAGNodeList) std::vector<std::shared_ptr<openmldb::sdk::DAGNode>>;

@@ -16,16 +16,13 @@
 
 #include "planv2/planner_v2.h"
 
-#include <memory>
 #include <utility>
 #include <vector>
 
 #include "case/sql_case.h"
 #include "gtest/gtest.h"
 #include "plan/plan_api.h"
-#include "zetasql/parser/parser.h"
-#include "zetasql/public/error_helpers.h"
-#include "zetasql/public/error_location.pb.h"
+
 namespace hybridse {
 namespace plan {
 
@@ -72,8 +69,8 @@ INSTANTIATE_TEST_SUITE_P(SqlOrderParse, PlannerV2Test,
 INSTANTIATE_TEST_SUITE_P(SqlJoinParse, PlannerV2Test,
                         testing::ValuesIn(sqlcase::InitCases("cases/plan/join_query.yaml", FILTERS)));
 
-// INSTANTIATE_TEST_SUITE_P(SqlUnionParse, PlannerV2Test,
-//                        testing::ValuesIn(sqlcase::InitCases("cases/plan/union_query.yaml", FILTERS)));
+INSTANTIATE_TEST_SUITE_P(SqlUnionParse, PlannerV2Test,
+                         testing::ValuesIn(sqlcase::InitCases("cases/plan/union_query.yaml", FILTERS)));
 
 INSTANTIATE_TEST_SUITE_P(SqlSubQueryParse, PlannerV2Test,
                         testing::ValuesIn(sqlcase::InitCases("cases/plan/sub_query.yaml", FILTERS)));
@@ -94,14 +91,19 @@ INSTANTIATE_TEST_SUITE_P(SQLCmdParserTest, PlannerV2Test,
 TEST_P(PlannerV2Test, PlannerSucessTest) {
     const auto& param = GetParam();
     std::string sqlstr = param.sql_str();
-    std::cout << sqlstr << std::endl;
-    base::Status status;
-    node::PlanNodeList plan_trees;
-    EXPECT_EQ(param.expect().success_, PlanAPI::CreatePlanTreeFromScript(sqlstr, plan_trees, manager_, status))
-        << status;
-    if (!param.expect().plan_tree_str_.empty()) {
-        // HACK: weak implementation, but usually it works
-        EXPECT_EQ(param.expect().plan_tree_str_, plan_trees.at(0)->GetTreeString());
+    vm::SqlContext ctx;
+    ctx.sql = sqlstr;
+    auto status = PlanAPI::CreatePlanTreeFromScript(&ctx);
+    EXPECT_EQ(param.expect().success_, status.isOK()) << status;
+    if (param.expect().success_) {
+        if (!param.expect().plan_tree_str_.empty()) {
+            // HACK: weak implementation, but usually it works
+            EXPECT_EQ(param.expect().plan_tree_str_, ctx.logical_plan.at(0)->GetTreeString());
+        }
+    } else {
+        if (!param.expect().msg_.empty()) {
+            EXPECT_EQ(absl::StripAsciiWhitespace(param.expect().msg_), status.msg);
+        }
     }
 }
 TEST_P(PlannerV2Test, PlannerClusterOnlineServingOptTest) {
@@ -114,10 +116,13 @@ TEST_P(PlannerV2Test, PlannerClusterOnlineServingOptTest) {
         LOG(INFO) << "Skip mode " << sql_case.mode();
         return;
     }
-    base::Status status;
-    node::PlanNodeList plan_trees;
+    vm::SqlContext ctx;
+    ctx.sql = sqlstr;
+    ctx.engine_mode = vm::kRequestMode;
+    ctx.is_cluster_optimized = true;
+    auto status = PlanAPI::CreatePlanTreeFromScript(&ctx);
     // TODO(ace): many tests defined in 'cases/plan/' do not pass, should annotated in yaml file
-    plan::PlanAPI::CreatePlanTreeFromScript(sqlstr, plan_trees, manager_, status, false, true);
+    plan::PlanAPI::CreatePlanTreeFromScript(&ctx);
 }
 
 TEST_F(PlannerV2Test, SimplePlannerCreatePlanTest) {
@@ -544,6 +549,30 @@ TEST_F(PlannerV2Test, CreateFunctionPlanTest) {
     ASSERT_EQ("/tmp/libmyfun.so", create_function_plan->Options()->begin()->second->GetExprString());
 }
 
+TEST_F(PlannerV2Test, CreateAggregateFunctionPlanTest) {
+    std::string sql_str = "CREATE AGGREGATE FUNCTION fun(x INT) RETURNS STRING OPTIONS (PATH='/tmp/libmyfun.so');";
+    node::PlanNodeList trees;
+    base::Status status;
+    ASSERT_TRUE(plan::PlanAPI::CreatePlanTreeFromScript(sql_str, trees, manager_, status)) << status;
+    ASSERT_EQ(1u, trees.size());
+    PlanNode *plan_ptr = trees[0];
+    ASSERT_TRUE(NULL != plan_ptr);
+
+    std::cout << *plan_ptr << std::endl;
+
+    // validate create plan
+    ASSERT_EQ(node::kPlanTypeCreateFunction, plan_ptr->GetType());
+    auto create_function_plan = dynamic_cast<node::CreateFunctionPlanNode *>(plan_ptr);
+    ASSERT_EQ("fun", create_function_plan->Name());
+    ASSERT_TRUE(create_function_plan->IsAggregate());
+    ASSERT_EQ("string", (dynamic_cast<const node::TypeNode*>(create_function_plan->GetReturnType()))->GetName());
+    ASSERT_EQ(1, create_function_plan->GetArgsType().size());
+    ASSERT_EQ("int32", (dynamic_cast<node::TypeNode*>(create_function_plan->GetArgsType().front()))->GetName());
+    ASSERT_EQ(1, create_function_plan->Options()->size());
+    ASSERT_EQ("PATH", create_function_plan->Options()->begin()->first);
+    ASSERT_EQ("/tmp/libmyfun.so", create_function_plan->Options()->begin()->second->GetExprString());
+}
+
 TEST_F(PlannerV2Test, CreateTableStmtPlanTest) {
     const std::string sql_str =
         "create table IF NOT EXISTS db1.test(\n"
@@ -575,7 +604,7 @@ TEST_F(PlannerV2Test, CreateTableStmtPlanTest) {
     node::CreatePlanNode *createStmt = (node::CreatePlanNode *)plan_ptr;
     ASSERT_EQ("db1", createStmt->GetDatabase());
     auto table_option_list = createStmt->GetTableOptionList();
-    node::NodePointVector partition_meta_list;
+    node::NodePointVector distribution_list;
     for (auto table_option : table_option_list) {
         switch (table_option->GetType()) {
             case node::kReplicaNum: {
@@ -587,12 +616,7 @@ TEST_F(PlannerV2Test, CreateTableStmtPlanTest) {
                 break;
             }
             case node::kDistributions: {
-                auto d_list = dynamic_cast<node::DistributionsNode *>(table_option)->GetDistributionList();
-                if (d_list != nullptr) {
-                    for (auto meta_ptr : d_list->GetList()) {
-                        partition_meta_list.push_back(meta_ptr);
-                    }
-                }
+                distribution_list = dynamic_cast<node::DistributionsNode *>(table_option)->GetDistributionList();
                 break;
             }
             case hybridse::node::kStorageMode: {
@@ -606,6 +630,9 @@ TEST_F(PlannerV2Test, CreateTableStmtPlanTest) {
             }
         }
     }
+    ASSERT_EQ(1, distribution_list.size());
+    auto partition_mata_nodes = dynamic_cast<hybridse::node::SqlNodeList*>(distribution_list.front());
+    const auto& partition_meta_list = partition_mata_nodes->GetList();
     ASSERT_EQ(3, partition_meta_list.size());
     {
         ASSERT_EQ(node::kPartitionMeta, partition_meta_list[0]->GetType());
@@ -665,6 +692,18 @@ TEST_F(PlannerV2Test, CmdStmtPlanTest) {
         ASSERT_EQ(node::kCmdShowDatabases, cmd_plan->GetCmdType());
     }
     {
+        const std::string sql_str = "exit;";
+        node::PlanNodeList trees;
+        base::Status status;
+        ASSERT_TRUE(plan::PlanAPI::CreatePlanTreeFromScript(sql_str, trees, manager_, status)) << status;
+        ASSERT_EQ(1u, trees.size());
+        PlanNode *plan_ptr = trees[0];
+        // validate create plan
+        ASSERT_EQ(node::kPlanTypeCmd, plan_ptr->GetType());
+        node::CmdPlanNode *cmd_plan = (node::CmdPlanNode *)plan_ptr;
+        ASSERT_EQ(node::kCmdExit, cmd_plan->GetCmdType());
+    }
+    {
         const std::string sql_str = "show tables;";
         node::PlanNodeList trees;
         base::Status status;
@@ -675,6 +714,33 @@ TEST_F(PlannerV2Test, CmdStmtPlanTest) {
         ASSERT_EQ(node::kPlanTypeCmd, plan_ptr->GetType());
         node::CmdPlanNode *cmd_plan = (node::CmdPlanNode *)plan_ptr;
         ASSERT_EQ(node::kCmdShowTables, cmd_plan->GetCmdType());
+    }
+    {
+        const std::string sql_str = "show table status;";
+        node::PlanNodeList trees;
+        base::Status status;
+        ASSERT_TRUE(plan::PlanAPI::CreatePlanTreeFromScript(sql_str, trees, manager_, status)) << status;
+        ASSERT_EQ(1u, trees.size());
+        PlanNode *plan_ptr = trees[0];
+        // validate create plan
+        ASSERT_EQ(node::kPlanTypeCmd, plan_ptr->GetType());
+        node::CmdPlanNode *cmd_plan = (node::CmdPlanNode *)plan_ptr;
+        ASSERT_EQ(node::kCmdShowTableStatus, cmd_plan->GetCmdType());
+        ASSERT_EQ(0, cmd_plan->GetArgs().size());
+    }
+    {
+        const std::string sql_str = "show table status like '*';";
+        node::PlanNodeList trees;
+        base::Status status;
+        ASSERT_TRUE(plan::PlanAPI::CreatePlanTreeFromScript(sql_str, trees, manager_, status)) << status;
+        ASSERT_EQ(1u, trees.size());
+        PlanNode *plan_ptr = trees[0];
+        // validate create plan
+        ASSERT_EQ(node::kPlanTypeCmd, plan_ptr->GetType());
+        node::CmdPlanNode *cmd_plan = (node::CmdPlanNode *)plan_ptr;
+        ASSERT_EQ(node::kCmdShowTableStatus, cmd_plan->GetCmdType());
+        ASSERT_EQ(1, cmd_plan->GetArgs().size());
+        ASSERT_EQ("*", cmd_plan->GetArgs()[0]);
     }
     {
         const std::string sql_str = "show procedures;";
@@ -1807,8 +1873,6 @@ INSTANTIATE_TEST_SUITE_P(SqlErrorQuery, PlannerV2ErrorTest,
                         testing::ValuesIn(sqlcase::InitCases("cases/plan/error_query.yaml", FILTERS)));
 INSTANTIATE_TEST_SUITE_P(SqlUnsupporQuery, PlannerV2ErrorTest,
                         testing::ValuesIn(sqlcase::InitCases("cases/plan/error_unsupport_sql.yaml", FILTERS)));
-INSTANTIATE_TEST_SUITE_P(SqlErrorRequestQuery, PlannerV2ErrorTest,
-                        testing::ValuesIn(sqlcase::InitCases("cases/plan/error_request_query.yaml", FILTERS)));
 
 TEST_P(PlannerV2ErrorTest, RequestModePlanErrorTest) {
     auto &sql_case = GetParam();
@@ -1818,11 +1882,13 @@ TEST_P(PlannerV2ErrorTest, RequestModePlanErrorTest) {
         LOG(INFO) << "Skip mode " << sql_case.mode() << " for request mode error test";
         return;
     }
-    base::Status status;
-    node::PlanNodeList plan_trees;
-    EXPECT_FALSE(plan::PlanAPI::CreatePlanTreeFromScript(sqlstr, plan_trees, manager_, status, false, false)) << status;
+    vm::SqlContext ctx;
+    ctx.sql = sqlstr;
+    ctx.engine_mode = vm::kRequestMode;
+    auto status = plan::PlanAPI::CreatePlanTreeFromScript(&ctx);
+    EXPECT_FALSE(status.isOK()) << status;
     if (!sql_case.expect_.msg_.empty()) {
-        EXPECT_EQ(sql_case.expect_.msg_, status.msg);
+        EXPECT_EQ(absl::StripAsciiWhitespace(sql_case.expect_.msg_), status.msg);
     }
 }
 TEST_P(PlannerV2ErrorTest, ClusterRequestModePlanErrorTest) {
@@ -1834,11 +1900,14 @@ TEST_P(PlannerV2ErrorTest, ClusterRequestModePlanErrorTest) {
         LOG(INFO) << "Skip mode " << sql_case.mode() << " for cluster request mode error test";
         return;
     }
-    base::Status status;
-    node::PlanNodeList plan_trees;
-    EXPECT_FALSE(plan::PlanAPI::CreatePlanTreeFromScript(sqlstr, plan_trees, manager_, status, false, true)) << status;
+    vm::SqlContext ctx;
+    ctx.sql = sqlstr;
+    ctx.engine_mode = vm::kRequestMode;
+    ctx.is_cluster_optimized = true;
+    auto status = plan::PlanAPI::CreatePlanTreeFromScript(&ctx);
+    EXPECT_FALSE(status.isOK()) << status;
     if (!sql_case.expect_.msg_.empty()) {
-        EXPECT_EQ(sql_case.expect_.msg_, status.msg);
+        EXPECT_EQ(absl::StripAsciiWhitespace(sql_case.expect_.msg_), status.msg);
     }
 }
 TEST_P(PlannerV2ErrorTest, BatchModePlanErrorTest) {
@@ -1849,11 +1918,13 @@ TEST_P(PlannerV2ErrorTest, BatchModePlanErrorTest) {
         LOG(INFO) << "Skip mode " << sql_case.mode() << " for batch mode error test";
         return;
     }
-    base::Status status;
-    node::PlanNodeList plan_trees;
-    EXPECT_FALSE(plan::PlanAPI::CreatePlanTreeFromScript(sqlstr, plan_trees, manager_, status, true)) << status;
+    vm::SqlContext ctx;
+    ctx.sql = sqlstr;
+    ctx.engine_mode = vm::kBatchMode;
+    auto status = plan::PlanAPI::CreatePlanTreeFromScript(&ctx);
+    EXPECT_FALSE(status.isOK()) << status;
     if (!sql_case.expect_.msg_.empty()) {
-        EXPECT_EQ(sql_case.expect_.msg_, status.msg);
+        EXPECT_EQ(absl::StripAsciiWhitespace(sql_case.expect_.msg_), status.msg);
     }
 }
 
@@ -1966,35 +2037,35 @@ TEST_F(PlannerV2ErrorTest, NonSupportOnlineServingSQL) {
 }
 
 
-TEST_F(PlannerV2ErrorTest, NonSupportClusterOnlinexTrainingSQL) {
+TEST_F(PlannerV2ErrorTest, ClusterOnlineTrainingSQL) {
     node::NodeManager node_manager;
     auto expect_converted = [&](const std::string &sql, const int code, const std::string &msg) {
       base::Status status;
       node::PlanNodeList plan_trees;
       // Generate SQL logical plan for online serving
-      ASSERT_FALSE(plan::PlanAPI::CreatePlanTreeFromScript(sql, plan_trees, manager_, status, true, true)) << status;
+      auto ret = plan::PlanAPI::CreatePlanTreeFromScript(sql, plan_trees, manager_, status, true, true);
+      ASSERT_EQ(ret, code == common::kOk);
       ASSERT_EQ(code, status.code) << status;
       ASSERT_EQ(msg, status.msg) << status;
       std::cout << msg << std::endl;
     };
 
-
     expect_converted(
         R"(
         SELECT COL1 from t1 GROUP BY COL1;
         )",
-        common::kPlanError, "Non-support kGroupPlan Op in cluster online training");
+        common::kOk, "ok");
 
     expect_converted(
         R"(
         SELECT SUM(COL2) from t1 HAVING SUM(COL2) >0;
         )",
-        common::kPlanError, "Non-support HAVING Op in cluster online training");
+        common::kOk, "ok");
     expect_converted(
         R"(
         SELECT SUM(COL2) from t1;
         )",
-        common::kPlanError, "Aggregate over a table cannot be supported in cluster online training");
+        common::kOk, "ok");
     expect_converted(
         R"(
         SELECT COL1 FROM t1 order by COL1;
@@ -2006,7 +2077,7 @@ TEST_F(PlannerV2ErrorTest, NonSupportClusterOnlinexTrainingSQL) {
         SELECT SUM(COL2) over w1 FROM t1
         WINDOW w1 AS (PARTITION BY col1 ORDER BY col5 ROWS BETWEEN 3 PRECEDING AND CURRENT ROW);
         )",
-        common::kPlanError, "Non-support WINDOW Op in cluster online training");
+        common::kOk, "ok");
 
     expect_converted(
         R"(
@@ -2014,6 +2085,7 @@ TEST_F(PlannerV2ErrorTest, NonSupportClusterOnlinexTrainingSQL) {
         )",
         common::kPlanError, "Non-support kJoinPlan Op in cluster online training");
 }
+
 TEST_F(PlannerV2Test, ClusterOnlinexTrainingSQLTest) {
     node::NodeManager node_manager;
     auto expect_converted = [&](const std::string &sql) {

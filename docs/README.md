@@ -35,7 +35,7 @@ If you fail to create conda envs by `environment.yml`, try following commands.
    4. pip3 install sphinx-multiversion 
    5. pip3 install myst-parser
    6. pip3 install sphinx-book-theme
-   7. pip3 install sphinx_copybutton
+   7. pip3 install sphinx-copybutton
    8. pip3 install myst-parser[linkify]
    ```
 ## Tips
@@ -43,6 +43,7 @@ If you fail to create conda envs by `environment.yml`, try following commands.
  Here are some important tips to help you get started:
 
 - For any changes, you must commit them before building. Changes that are not committed will not be reflected in the generated HTML files.
+- We just build the branches which match `smv_branch_whitelist=r"^(main|v\d+\.\d+)$"`. If you want to build your own branch, e.g. my-branch, you can set `smv_branch_whitelist=r"^(main|v\d+\.\d+|my-branch)$` temporarily.
 - We are using MyST parser to support Markdown in Sphinx. Furthermore, MyST has a few very useful syntax extensions for better formatting. You may read [the syntax guide of MyST](https://myst-parser.readthedocs.io/en/latest/syntax/syntax.html).
 
 ## Deployment

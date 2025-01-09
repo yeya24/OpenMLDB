@@ -1,5 +1,489 @@
 # Changelog
 
+## [0.9.2] - 2024-07-26
+
+### Bug Fixes
+- Fix upgrade openmldb sdk version in self host (#3962 @aceforeverd)
+- Fix select from JOB_INFO should always in online mode (#3963 @aceforeverd)
+- Fix update create-pull-request action to v6 in udf-doc-gen workflow & rm deprecated file sync (#3964 @Jayaprakash0511)
+- Fix build in centos7 EOL (#3965 @aceforeverd)
+- Fix numpy version lock (#3966 @aceforeverd)
+
+## [0.9.1] - 2024-07-17
+
+### Features
+- Support merge DAG SQL in Java SDK (#3911 @wyl4pd)
+- Support tablets get user table remotely (#3918 @oh2024)
+- Support set global variable @@execute_mode = 'request' (#3924 @aceforeverd)
+- Support crud users synchronously (#3928 @oh2024)
+- Support simple ANSI SQL rewriter(#3934 @aceforeverd)
+- Support execute mode batchrequest(#3938 @aceforeverd)
+- Support new UDF of isin, array_combine, array_join and locate, (#3939 #3945 @aceforeverd #3940 #3943 @howdb)
+- Support server side authorization (#3941 @oh2024)
+- Support new index type and IoT Table (#3944 @vagetablechicken)
+
+### Bug Fixes
+- Fix setup script uses incorrect ZooKeeper configuration file(#3901 @greatljn)
+- Fix make clients use always send auth info(#3906 @oh2024)
+- Fix drop aggr tables in drop table (#3908 @vagetablechicken)
+- Fix checkout execute_mode in config clause in sql client (#3909 @aceforeverd)
+- Fix continuous sign for gcformat with space (#3921 @wyl4pd)
+- Fix package issues by removing s3 dependencies and fix package conflict of curator (#3929 @tobegit3hub)
+- Fix repeated sort keys and sort as int(#3947 @oh2024)
+- Fix checkout action on old glibc OS (#3955 @aceforeverd)
+- Fix CICD issue of deploying spark correctly(#3958 @aceforeverd)
+
+### Testing
+- Set NPROC in intergration test(#3782 @dl239)
+- Support map data type in yaml testing framework(#3765 @aceforeverd)
+- Add automatic table cleanup after go sdk tests(#3799 @oh2024)
+- Fix sql_cmd_test and no impl for MakeMergeNode(#3829 @aceforeverd)
+- Add query performance benchmark(#3855 @gaoboal)
+
+## [0.9.0] - 2024-04-25
+
+### Breaking Changes
+- Upgrade SQLAlchemy to 2.0.27 and SQLAlchemy 1.x is not supported(#3805 @yht520100)
+- Correct semantic for `first_value` which will be compatible with ANSI SQL(#3861 @aceforeverd)
+- Set execute_mode default to `online` which was `offline` before 0.9.0(#3862 @aceforeverd)
+- The client-side authentication is deprecated and we can enable authentication in server-side(#3835 #3885 @oh2024)
+
+### Features
+- Support offline building docker image(#3773 #3787 @QiChenX, #3778 @aceforeverd)
+- Support MySQL protocol with new module OpenM(ysq)LDB(#3800 @tobegit3hub #3816 #3820 #3823 #3824 #3831 @yangwucheng)
+- Support map datatype for SQL engine(#3841 #3847 @aceforeverd)
+- Support TiDB backend for online and offline storage(#3815 #3839 @yht520100)
+- Kafka connector support string timestamp and partial insert(#3834 @vagetablechicken)
+- Support arbitrary spark distribution and remove dependency of OpenMLDB Spark(#3849 @tobegit3hub)
+- Support insert function in offline mode(#3854 @Matagits)
+- Support feature signature with SQL functions(#3877 @wyl4pd)
+- Support request mode in raw SQL(#3874 @aceforeverd)
+
+### Bug Fixes
+- Fix delete with same ts(#3780 @dl239)
+- Fix '\x00' Issue in Python SDK Precompiled SQL Inserts(#3788 @yht520100)
+- Fix import spark config when creating like hive(@3792 @vagetablechicken)
+- Fix select constant return empty value in offline (#3825 @Matagits)
+- Fix show and load sql to print result set for notebook magic function(#3856 @tobegit3hub)
+- Fix TTL merge for different types(#3859 @vagetablechicken)
+- Fix ddl parser when getting duplicated column keys(#3873 @vagetablechicken)
+- Fix initializing nameserver bug when calling zk RegisterName(#3869 @oh2024)
+
+### Testing
+- Set NPROC in intergration test(#3782 @dl239)
+- Support map data type in yaml testing framework(#3765 @aceforeverd)
+- Add automatic table cleanup after go sdk tests(#3799 @oh2024)
+- Fix sql_cmd_test and no impl for MakeMergeNode(#3829 @aceforeverd)
+- Add query performance benchmark(#3855 @gaoboal)
+
+## [0.8.5] - 2024-02-27
+
+### Features
+- Support Iceberg as an offline storage (#3737 @vagetablechicken)
+- Support `UNION ALL` statement (#3590 #3653 @aceforeverd)
+- Support `SELECT ... INTO OUTFILE` to OpenMLDB online tables (#3616 @tobegit3hub)
+- Support `LAST JOIN` and `WINDOW` without `ORDER BY` in offline mode (#3619 @aceforeverd)
+- Support `CREATE/ALTER/DROP USER` statement (#3678 #3745 #3747 @dl239, #3744 @tobegit3hub)
+- Support specifying Spark configurations in the SDK (#3613 @tobegit3hub)
+- `INSERT`returns failure if the server-side memory usage exceeds the specified limit (#3631 @dl239)
+- Add a new interfact for SQLs to DAG (#3630 @aceforeverd)
+- If the deployed SQL contains the `LEFT JOIN`, the indexs will be created automatically. (#3667 @aceforeverd)
+- Support automatic deletion of logs (#3704 #3736 #3706 @dl239)
+- Support `absandlat/absorlat` TTL type for disktable (#3716 @dl239)
+- Optimize error messages for insert failures (#3725 @vagetablechicken)
+- Improve the documents (#3617 #3519 #3690 #3699 @vagetablechicken, #3612 @dl239, #3609 #3672 #3687 @aceforeverd, #3649 #3570 #3569 @TanZiYen @Elliezza, #3665 @DrDub, #3585 #3584 #3579 #3578 #3574 #3573 #3552 #3539 #3488 #3477 #3475 #3586 #3470 #3474 #3568 #3583 #3564 #3764 @TanZiYen, #3688 #3697 #3753 #3721 #3731 #3739 #3754 #3720 #3756 #3762 #3752 #3757 #3719 @Elliezza, #3075 @Elliezza @tobegit3hub, #3710 @tobegit3hub)
+- Other minor features (#3623 #3636 @aceforeverd, #3651 @tobegit3hub, #3641 #3692 @vagetablechicken, #3582 #3702 @dl239, #3674 @lqy222)
+
+### Bug Fixes
+- Executing offline tasks will consume an excessive number of ZooKeeper connections (#3642 @dl239)
+- There is no automatic reconnection after ZooKeeper disconnection in SDK. (#3656 #3668 @vagetablechicken)
+- The `FlexibleRowBuilder` will throw a `NullPointerException` if set with a null value (#3649 @dl239)
+- If the length of strings in the imported data exceeds 255, it may throw a `BufferOverflowException`. (#3729 @ljwh)
+- If a table contains a large amount of data, querying the data may still be possible after executing `TRUNCATE` (#3677 @dl239)
+- After deleting data, it can still be retrieved from other indexes (#3693 @dl239)
+- Delete dirty data when insertion fails (#3681 @dl239)
+- When there are no tables, getting databases using `GetAllDbs` fails. (#3742 @vagetablechicken)
+- Adding a deleted index fails if the index name is different from the previous name (#3635 @dl239)
+- Other minor bug fixes (#3638 #3654 #3717 #3726 #3743 @vagetablechicken, #3607 #3775 @dl239, #3640 @tobegit3hub, #3686 #3735 #3738 #3740 @aceforeverd, #3759 @yangwucheng)
+
+### Code Refactoring
+#3666 @vagetablechicken
+
+## [0.8.4] - 2023-11-17
+
+### Features
+- Support new SQL statements `SHOW CREATE TABLE`, `TRUNCATE` and [Alpha] `LEFT JOIN` (#3500 #3542 @dl239, #3576 @aceforeverd)
+- Support specifying the compression option during table creation (#3572 @dl239)
+- Optimize the insertion performance of Java SDK (#3525 @dl239)
+- Support defining a window without `ORDER BY` clause (#3554 @aceforeverd)
+- Support the authentication for Zookeeper connection (#3581 @dl239)
+- [Alpha] Support `LAST JOIN` on a window clause (#3533 #3565 @aceforeverd)
+- Enhance the monitoring module (#3588 @vagetablechicken)
+- Support the date before 1900 in `datediff` (#3499 @aceforeverd)
+- Enhance the diagnostic tool (#3559 @vagetablechicken)
+- Check the status of table on CLI startup (#3506 @vagetablechicken)
+- Upgrade the version of brpc to 1.6.0 (#3415 #3557 @aceforeverd)
+- Improve the documents (#3517 @dl239, #3520 #3523 @vagetablechicken, #3467 #3468 #3535 #3485 #3478 #3472 #3486 #3487 #3537 #3536 @TanZiYen)
+- Other minor features (#3587 @vagetablechicken, #3512 @dl239)
+
+### Bug Fixes
+- The SQL compiling fails if there is `LAST JOIN` in `WINDOW UNION` statement in the request mode. (#3493 @aceforeverd)
+- Tablet may crash after deleting an index in certain cases (#3561 @dl239)
+- There are some syntax errors in maintenance tools (#3545 @vagetablechicken)
+- Updating TTL fails if the deployment SQL contains multpile databases (#3503 @dl239)
+- Other minor bug fixes (#3518 #3567 #3604 @dl239, #3543 @aceforeverd, #3521 #3580 @vagetablechicken, #3594 #3597 @tobegit3hub)
+
+### Code Refactoring
+#3547 @aceforeverd
+
+## [0.8.3] - 2023-09-15
+
+### Features
+- Optimize the performance of Java SDK (#3445 @dl239)
+- Optimize the writing performance and significantly reduce the memory consumption of the Spark connector (#3443 @vagetablechicken)
+- Support loading data from HIVE with customized SQLs (#3380 @tobegit3hub)
+- Improve the output message for SDK and CLI (#3384 @vagetablechicken, #3434 #3494 @dl239)
+- Support new built-in functions `json_array_length` and `get_json_object` (#3414 #3429 @aceforeverd)
+- Add new options `RANGE_BIAS` and `ROWS_BIAS` for the `DEPLOYMENT` statement (#3456 @vagetablechicken)
+- Support `const` project in online mode (#3376 @aceforeverd)
+- Support `SHOW DEPLOYMENT` and `DROP DEPLOYMENT` with a database name (#3353 @emo-coder)
+- Support inheriting environment variables for Spark (#3450 @vagetablechicken)
+- Support deleting HDFS files when dropping tables (#3369 @tobegit3hub)
+- Enhance the diagnostic tool (#3330 @zhangziheng01233)
+- Enhance the operation tool (#3455 @dl239)
+- Use the timeout value set by an user only if that is greater than the default value (#3484 @vagetablechicken)
+- Remove the sync tool from the demo docker image (#3390 @dl239)
+- Improve the documents (#3383 #3392 #3410 @vagetablechicken, #3175 #3447 ##3463 @TanZiYen, #3436 @aceforeverd, #3451 @wangerry, #3453 #3462 #3498 @dl239)
+
+### Bug Fixes
+- `CREATE TABLE LIKE HIVE` returns success even if a database is not found (#3379 @emo-coder)
+- If an error occurred when executing `DROP FUNCTION`, the function cannot be deleted again. (#3362 @vagetablechicken, #3441 @dl239)
+- The results of `SHOW JOBS` are not sorted by `id` (#3371 @emo-coder)
+- NameServer will crash if creating system tables fails. (#3432 @dl239)
+- `CREATE INDEX` may fail if the previous `CREATE INDEX` command on the same table has not finished. (#3393 @dl239)
+- The result of `SELECT` on the deleted index column is empty (#3426 @dl239)
+- Other minor bug fixes (#3391 #3408 @vagetablechicken, #3386 #3427 #3459 @dl239, #3367 #3495 @aceforeverd)
+
+### Code Refactoring
+#3397 @emo-coder, #3411 @vagetablechicken, #3435 @aceforeverd, #3473 @lqy222
+
+### Breaking Changes
+- The return type of `GetInternalSchema` in `SQLResultSet` changes from native Schema to `com._4paradigm.openmldb.sdk.Schema` #3445
+- Remove the deprecated TaskManager configuration `namenode.uri` #3369
+
+## [0.8.2] - 2023-07-20
+
+### Features
+- Enhance the `delete` statement (#3301 #3374 @dl239)
+- Enhance the C++ SDK (#3334 @vagetablechicken)
+- Support the new option `IF EXISTS` in the `DROP TABLE/DATABASE` statement (#3348 @emo-coder)
+- Improve the documents (#3344 #3152 #3355 #3360 @vagetablechicken, #3341 @aceforeverd, #3343 #3372 @dl239, #2968 @selenachenjingxin)
+- Upgrade the version of Kafka connector to `10.5.0-SNAPSHOT-0.8.1` (#3365 @vagetablechicken)
+
+### Bug Fixes
+- Loading external UDF libraries fails under certain environment when runing an offline task (#3350 #3359 @vagetablechicken)
+- Loading data fails with Hive soft links (#3349 @vagetablechicken)
+- Insertion succeeds but with an invalid timestamp (#3313 @aceforeverd)
+- The bool type is not properly packed in APIServer. (#3366 @vagetablechicken)
+- The table can be created successfully when there are duplicated indexs. (#3306 @dl239)
+
+### Breaking Changes
+- The field `Offline_deep_copy` will be replaced by `Offline_symbolic_paths` in the result of `SHOW TABLE STATUS` #3349.
+
+## [0.8.1] - 2023-06-28
+
+### Features
+- Support a new SQL statement `ALTER TABLE ... ADD/DROP OFFLINE_PATH ...` (#3286 @aceforeverd, #3323 @tobegit3hub)
+- Support deploying SQLs in which the involved tables have data but without pre-aggregation defined (#3288 @dl239)
+- Support new built-in functions `top_n_value_ratio_cate`, `top_n_key_ratio_cate`, `list_except_by_key` and `list_except_by_value` (#3329 @aceforeverd)
+- Add a new SDK API to merge multiple SQLs for deployment (#3297 @vagetablechicken)
+- Support mapping topic tables in the Kafka connector (#3282 @vagetablechicken)
+- Support deploying the Kafka connector in Docker and Kubernetes (#3276 @tobegit3hub)
+- Support fetching jobs from NameServer (#3293 @dl239)
+- Enhance the diagnostic tool (#3224 #3208 #3285 #3258 #3303 @zhangziheng01233)
+- Enhance the `SELECT INTO ...` statement (#2529 @vagetablechicken)
+- Improve the documents (#3308 @aceforeverd)
+- Other minor features (#3312 #3314 @vagetablechicken, #3298 @aceforeverd)
+
+### Bug Fixes
+- SQL deployment fails in some cases (#3328 @vagetablechicken)
+- Creating UDFs/UDAFs may fail as the `udf` directory does not exist by default. (#3326 @vagetablechicken)
+- Other minor bug fixes (#3281 #3284 @vagetablechicken)
+
+### Code Refactoring
+#3226 @dl239, #3294 @aceforeverd
+
+## [0.8.0] - 2023-05-12
+
+### Features
+- Add a new synchronization tool to automatically synchronize data from online storage to offline storage (#3256 @vagetablechicken)
+- Support the new built-in functions `var_samp`, `var_pop`, `entropy`, `earth_distance`, `nth_value_where` and `add_months` (#3046 #3193 @aceforeverd)
+- Support batch read for openmldb-spark-connector (#3070 @tobegit3hub)
+- [Alpha] Support Kubernetes as a TaskManager backend for the offline engine (#3147 #3157 #3185 @tobegit3hub)
+- Support LAST JOIN over WHERE clause (#3134 @aceforeverd)
+- Support LAST JOIN in WINDOW UNION clause (#3205 @aceforeverd)
+- Supports a decimal place as the second parameter in the function `round` (#3221 @aceforeverd)
+- Support Amazon S3 as an offline data source (#3229 #3261 @tobegit3hub)
+- Add the new option `SKIP_INDEX_CHECK` to skip index checking when deploying SQLs (#3241 @dl239)
+- Support symbolic paths for offline table (#3235 @tobegit3hub)
+- Improve the documents (#3104 #2993 @selenachenjingxin, #3113 #3118 #3239 @tobegit3hub, #3150 #3184 #3237 #3255 @aceforeverd, #3160 #3195 #3197 #3223 @lumianph, #3192 #3215 @haseeb-xd, #3201 #3220 #3232 #3236 #3254 @vagetablechicken, #3213 @alexab612, #3189 #3199 @TanZiYen)
+- Other minor features (#3115 #3143 #3182 @tobegit3hub, #2818 #3123 @aceforeverd, #3128 #3127 @dl239)
+
+### Bug Fixes
+- There is curator conflict problem when executing offline SQLs under certain circumstances. (#3090 @tobegit3hub)
+- `CREATE TABLE ... LIKE HIVE ...` statement execution fails if there is no database in a table name. (#3063 @tobegit3hub)
+- The CLI shows `success` even though `CREATE TABLE ... LIKE ...` execution fails. (#3080 @tobegit3hub)
+- `SELECT ... INTO ...` statement execution fails in the offline mode if there is no source table. (#3116 @tobegit3hub)
+- Compilation fails when `SELECT * ` over two LAST JOIN. (#3117 @aceforeverd)
+- The syncing job thread will enter an infinite loop if querying `JOB_INFO` fails. (#3169 @vagetablechicken)
+- SQLs deployment fails if there are more than one conditions on a JOIN statement. (#3196 @vagetablechicken)
+- Registered tables cannot be fetched when enabling SparkSQL for the offline engine (#3057 @tobegit3hub)
+- Other minor bug fixes (#3097 #3095 @dl239, #3109 #3141 #3162 #3234 @aceforeverd, #3096 #3112 @tobegit3hub, #3231 #3251 @vagetablechicken)
+
+### Code Refactoring
+#3188 @tobegit3hub
+
+## [0.7.3] - 2023-03-22
+
+### Features
+- Support C/C++ based User-Defined Aggregated Functions (UDAFs) (#2825 @dl239)
+- Improve the diagnostic tool to support a few new sub-commands (#3106 @vagetablechicken)
+- Add a new script to modify the node environment configuration (#3142 @dl239)
+- Change the default value of `max_traverse_cnt` to unlimited to avoid result truncated when performing queries in CLI (#2999 @dl239)
+- Improve the documents (#3111 #3093 #3119 @selenachenjingxin, #3105 #3125 #3120 @vagetablechicken, #3114 #3126 @dl239, #3128 @lumianph)
+
+### Bug Fixes
+- The user-provided `SPARK_HOME` does not work in the deployment scripts. (#3085 @zhanghaohit)
+- The result of `SELECT timestamp(string_val)` is incorrect at the offline mode. (#3088 @tobegit3hub)
+
+### Code Refactoring
+#3122 @haseeb-xd
+
+Note:
+If the configuration of a tablet has not been updated when upgrading to this new version, the query result still may be truncated as the old version (#2999).
+
+## [0.7.2] - 2023-02-17
+
+### Features
+- [Alpha] Support the new SQL clause `WITH` (#2846 @aceforeverd)
+- Support deploying multiple TaskManagers (#3004 @zhanghaohit)
+- Support the new built-in functions `std`, `stddev`, `stddev_samp`, `stddev_pop`, `ew_avg` and `drawdown` (#3025 #3032 #3029 @zhanghaohit)
+- Add the new configurations to specify the maximum size of RocksDB's log files (#2991 @dl239)
+- The `CREATE TABLE ... LIKE PARQUET ...` statement supports a parquet file as the input in the offline mode. (#2996 @tobegit3hub)
+- Support showing query results of synchronous jobs in TaskManager (#3034 @vagetablechicken)
+- Change the default timeout of synchronous jobs to 30 minutes, and add a corresponding CLI parameter for configuration (#3061 @vagetablechicken)
+- Improve the documents (#2938 #2984 #3016 @vagetablechicken, #2958 #2973 #2980 #2987 #2988 #3035 @lumianph, #2990 @lukeAyin, #2997 #3065 @tobegit3hub, #3011 #3027 @dl239, #3020 #3066 #3071 #3074 @aceforeverd, #3033 #3036 @selenachenjingxin)
+
+### Bug Fixes
+- Disk table does not clean the expired data. (#2963 @dl239)
+- Incorrect index will be added if there is `LAST JOIN` statement in a deployed SQL. (#2979 @dl239)
+- The result is incorrect if a window frame is specified by `EXCLUDE CURRENT_ROW` (#2930 @aceforeverd)
+- SQL compiling fails if there is an UDF function in an UDAF expression. (#3018 @aceforeverd)
+- Although the return information indicates success, index creation may still fail in some cases. (#3042 @vagetablechicken)
+- The `recoverdata` command fails if there are a large number of records in a memory table. (#3060 @dl239)
+- The `deploy-all` tool deploys the Spark package to local nodes only. (#3022 @zhanghaohit)
+- Other minor bug fixes (#2970 #3028 #3026 #3003 #3064 @dl239)
+
+### Code Refactoring
+#2995 #3030 @aceforeverd
+
+Note:  
+While we have resolved the overflow issue in the current version of the monitor component #3003, it may still persist when upgrading from an older version.
+
+## [0.7.1] - 2023-01-13
+
+### Features
+- Support data import from Hive using a symbolic link (#2948 @vagetablechicken)
+- Support the new SQL statement `CREATE TABLE LIKE` (#2949 @aceforeverd, #2962 @tobegit3hub)
+- Improve the non-interactive CLI (#2898 @vagetablechicken)
+- Improve the documents (#2904 #2921 #2932 #2942 @selenachenjingxin, #2925 #2928 #2934 #2954 @vagetablechicken, @2924 @dl239, #2945 #2952 @lumianph, #2946 @aceforeverd)
+
+### Bug Fixes
+- The result of `_*_cate` is incorrect. (#2939 @zhanghaohit)
+- The deployment of SQL fails if the column name of a major table is a keyword. (#2894 @dl239)
+- Tablet may core dump when executing SQLs with disk tables. (#2926 @dl239)
+- There is memory leak when writing data into disk tables. (#2943 @dl239)
+- The result of `show components` is incorrect in certain cases. (#2940 @dl239)
+- Offline jobs execution fails in certain cases because the `Curator` component causes an incompatible issue. (#2936 @tobegit3hub)
+- Disabling the monitor log (#2953 @dl239)
+
+### Code Refactoring
+#2875 #2937 @dl239
+
+## [0.7.0] - 2022-12-30
+
+### Features
+- Improve the messages and errors when inserting rows (#2834 @vagetablechicken)
+- Add a new configuration `max_memory` to limit the memory usage of a tablet (#2815 @dl239)
+- Add new maintenance tools `deploy-all` and `start-all` (#2809 @zhanghaohit)
+- Insertion returns errors if the value of timestamp field is negative (#2776 @dl239)
+- Support the new built-in functions `unix_timestamp`, `pmod`, `datediff`, and `size` (#2843 #2839 #2847 #2864 @zhanghaohit)
+- Add the new data type of `ARRAY` in UDFs (#2817 @aceforeverd)
+- Improve the documents (#2868 @haseeb-xd, #2878 @Jake-00, #2879 #2876 #2889 #2890 @vagetablechicken, #2881 #2907 #2908 #2897 @selenachenjingxin, #2859 @AdvancedUno, #2893 @lumianph, #2916 @aceforeverd)
+
+### Bug Fixes
+- Window over a subquery(t1 LAST JOIN t2) fails due to column renaming in the subquery. (#2739 @aceforeverd)
+- `SHOW JOBLOG` fails under certain circumstances. (#2874 @tobegit3hub)
+- `OP` is not deleted if the related table has been dropped. (#2548 @dl239)
+- Memory is not released when deleting an index in some cases. (#2806 @dl239)
+- Changing a leader to a specified endpoint fails if there are data writing. (#2858 @dl239)
+- UDFs do not work for `yarn-client` and `yarn-cluster` in the offline mode. (#2802 @tobegit3hub)
+- Other minor bug fixes (#2828 #2903 #2906 @vagetablechicken, #2867 #2912 @dl239)
+
+### Code Refactoring
+#2860 @mammar11, #2865 #2863 @vagetablechicken, #2861 #2862 #2871 @Ziy1-Tan
+
+## [0.6.9] - 2022-12-08
+
+### Features
+- Add `pre-upgrade` and `post-upgrade` options in tools for upgrade (#2761 @zhanghaohit)
+- Support starting OpenMLDB with daemon (#2833 @vagetablechicken)
+- Improve the documents (#2827 @tobegit3hub, #2838 @vagetablechicken)
+
+### Bug Fixes
+- The CLI may crash if executing `show job` without a job ID. (#2771 @aceforeverd)
+- `select count(*)` may return empty result after tablets restart. (#2835 @zhanghaohit)
+- A tablet may crash if the output of SQL engine runner is `null`. (#2831 @dl239)
+
+## [0.6.8] - 2022-11-29
+
+### Features
+- Support the `where` clause in the SQL batch engine (#2820 @tobegit3hub)
+- Support input and output with the JSON format in APIServer (#2813 @vagetablechicken)
+- Improve the documents (#2814 @vagetablechicken)
+
+### Code Refactoring
+#2816 @dl239, #2714 @aceforeverd
+
+## [0.6.7] - 2022-11-22
+
+### Features
+- Support importing and exporting data from/to Hive (@2778 @vagetablechicken)
+- Improve the module of `autofe` (#2777 @vagetablechicken)
+- Improve error messages of the `TaskManager` client (#2780 @vagetablechicken)
+- Improve the documents (#2781 @zhanghaohit, #2767 #2792 @vagetablechicken, #2805 @selenachenjingxin, #2810 @dl239)
+
+### Bug Fixes
+- Python SDK workflow may fail on MacOS. (#2783 @vagetablechicken, #2788 @dl239)
+- There are syntax errors in some log messages. (@2770 dl239)
+- Installing Python SDK requires unnessary packages. (#2791 @vagetablechicken)
+
+## [0.6.6] - 2022-11-14
+
+### Features
+- Support the new build-in function `hash64` (#2754 @aceforeverd)
+- Improve the documents (#2763 @dl239, #2610 #2606 @michelle-qinqin)
+
+### Bug Fixes
+- `pytest` command is not found in the MacOS virtual machine. (#2765 @tobegit3hub)
+- Wrong output schema passes to the `WindowAggRunner`. (#2758 @aceforeverd)
+- There are no outputs when executing `showopstatus` command if no database is specified (#2773 @dl239)
+- The data recovery tool fails in some cases (#2768 @dl239)
+
+## [0.6.5] - 2022-11-04
+
+### Features
+- Optimize the distribution of table partitions (#2701 @jkpjkpjkp)
+- Add a new workflow to generate the documents of built-in functions automatically (#2709 #2729 @aceforeverd)
+- Support the new SQL statement `show joblog` (#2732 @aceforeverd, #2747 @tobegit3hub)
+- Add a warning message for `show table status` (#2738 @zhanghaohit)
+- Add a new tool for data recovery and scale-out/scale-in (#2736 @dl239)
+- Improve the documents (#2707 #2727 @aceforeverd, #2718 #2538 #2731 #2752 @vagetablechicken, #2607 #2609 @michelle-qinqin, #2733 @zhanghaohit, #2742 @auula)
+
+### Bug Fixes
+- Incorrect data will be loaded in offline mode if the schema mismatches with parquet files. (#2648 @vagetablechicken)
+- Creating index fails if specifying a database in SQL statement (#2720 @dl239)
+- `start_time` is not human-readable after submitting a job (#2751 @tobegit3hub)
+- Incorrect result of `GetRecordIdxCnt` is produced in `MemTable` (#2719 @jkpjkpjkp)
+
+### Code Refactoring
+#2688 #2717 @vagetablechicken, #2705 #2728 @dl239, #2601 @team-317, #2737 @Jake-00
+
+## [0.6.4] - 2022-10-21
+
+### Features
+- Support a new series of built-in functions `top_n_value_*_cate_where` (#2622 @aceforeverd)
+- Support online batch computation and aggregation over a full table (#2620 @zhanghaohit)
+- Support `load_mode` and `thread` options for `LOAD DATA` (#2684 @zhanghaohit)
+- Improve the documents (#2476, #2486 #2514 #2611 #2693 #2462 @michelle-qinqin, #2695 @lumianph, #2653 @vagetablechicken)
+- Support running MacOS compiling jobs in the CICD workflow (#2665 @dl239)
+
+### Bug Fixes
+- Recreating index fails if it has been dropped. (#2440 @dl239)
+- The `traverse` method may get duplicate data if there are same `ts` records on one `pk` (#2637 @dl239)
+- Multiple window union will fail when compiling in batch mode (#2478 @tobegit3hub, #2561 @aceforeverd)
+- `select * ...` statement may cause inconsistent output schemas in many cases (#2660 @aceforeverd)
+- Result is incorrect if the window is specified as `UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT_ROW` (#2674 @aceforeverd)
+- Incorrect slice offsets may lead to offline jobs hang (#2687 @aceforeverd)
+- Other minor bug fixes (#2669 @dl239, #2683 @zhanghaohit)
+
+### Code Refactoring
+#2541 @dl239, #2573 #2672 @haseeb-xd
+
+
+## [0.6.3] - 2022-10-14
+
+### Features
+- Support setting the configuration of `glog` for clients (#2482 @vagetablechicken)
+- Add the checksum of SHA256 for release packages (#2560 @team-317)
+- Support the new build-in function `unhex` (#2431 @aucker)
+- Support the readable date and time format in CLI (#2568 @dl239)
+- Support the `LAST JOIN` with a subquery as a producer of window node in the request mode (#2569 @aceforeverd)
+- Upgrade the Spark version to 3.2.1 (#2566 @tobegit3hub, #2635 @dl239)
+- Support setting the SQL cache size in SDKs (#2605 @vagetablechicken)
+- Add a new interface of `ValidateSQL` to validate the syntax of SQL (#2626 @vagetablechicken)
+- Improve the documents (#2405 #2492 #2562 #2496 #2495 #2436 #2487 #2623 @michelle-qinqin, #2543 @linjing-lab, #2584 @JourneyGo, #2567 #2583 @vagetablechicken, #2643 @dl239)
+- Other minor features (#2504 #2572 #2498 #2598 @aceforeverd, #2555 #2641 @tobegit3hub, #2550 @zhanghaohit, #2595 @Elliezza, #2592 @vagetablechicken)
+
+### Bug Fixes
+- After a nameserver restarting, deployments may not recover. (#2533 @dl239)
+- If the type of first column is `bool`, it fails to resolve the function `count_where`.  (#2570 @aceforeverd)
+- Other minor bug fixes (#2540 #2577 #2625 #2655 @dl239, #2585 @snehalsenapati23, #2539 @vagetablechicken)
+
+### Code Refactoring
+#2516 #2520 #2522 #2521 #2542 #2531 #2581 @haseeb-xd, #2525 #2526 #2527 #2528 @kstrifonoff, #2523 @ighmaZ, #2546 #2549 @NevilleMthw, #2559 @marandabui, #2554 @gokullan, #2580 @team-317, #2599 @lbartyczak, #2594 @shivamgupta-sg, #2571 @Jake-00
+
+## [0.6.2] - 2022-09-20
+
+### Features
+- Support independently executing the OpenMLDB offline engine without the OpenMLDB deployment (#2423 @tobegit3hub)
+- Support the log setting of ZooKeeper and disable ZooKeeper logs in the diagnostic tool (#2451 @vagetablechicken)
+- Support query parameters of the SQL query APIs (#2277 @qsliu2017)
+- Improve the documents (#2406 @aceforeverd, #2408 #2414 @vagetablechicken, #2410 #2402 #2356 #2374 #2396 #2376 #2419 @michelle-qinqin, #2424 #2418 @dl239, #2455 @lumianph, #2458 @tobegit3hub)
+- Other minor features (#2420 @aceforeverd, #2411 @wuyou10206, #2446 #2452 @vagetablechicken, #2475 @tobegit3hub)
+
+### Bug Fixes
+- Table creation succeeds even if `partitionnum` is set to 0, which should report an error. (#2220 @dl239)
+- There are thread races in aggregators if there are concurrent `puts`. (#2472 @zhanghaohit)
+- The `limit` clause dose not work if it is used with the `where` and `group by` clauses. (#2447 @aceforeverd)
+- The `TaskManager` process will terminate if ZooKeeper disconnects. (#2494 @tobegit3hub)
+- The replica cluster dose not create the database if a database is created in the leader cluster (#2488 @dl239)
+- When there is data in base tables, deployment with long windows still can be executed (which should report an error). (#2501 @zhanghaohit)
+- Other minor bug fixes (#2415 @aceforeverd, #2417 #2434 #2435 #2473 @dl239, #2466 @vagetablechicken)
+
+### Code Refactoring
+#2413 @dl239, #2470 #2467 #2468 @vagetablechicken
+
+## [0.6.1] - 2022-08-30
+
+### Features
+- Support new build-in functions `last_day` and `regexp_like` (#2262 @HeZean, #2187 @jiang1997)
+- Support Jupyter Notebook for the TalkingData use case (#2354 @vagetablechicken)
+- Add a new API to disable Saprk logs of the batch engine (#2359 @tobegit3hub)
+- Add the use case of precision marketing based on OneFlow (#2267 @Elliezza @vagetablechicken @siqi)
+- Support the RPC request timeout in CLI and Python SDK (#2371 @vagetablechicken)
+- Improve the documents (#2021 @liuceyim, #2348 #2316 #2324 #2361 #2315 #2323 #2355 #2328 #2360 #2378 #2319 #2350 #2395 #2398 @michelle-qinqin, #2373 @njzyfr, #2370 @tobegit3hub, #2367 #2382 #2375 #2401 @vagetablechicken, #2387 #2394 @dl239, #2379 @aceforeverd, #2403 @lumianph, #2400 gitpod-for-oss @aceforeverd, )
+- Other minor features (#2363 @aceforeverd, #2185 @qsliu2017)
+
+### Bug Fixes
+- `APIServer` will core dump if no `rs` in `QueryResp`. (#2346 @vagetablechicken)
+- Data has not been deleted from `pre-aggr` tables if there are delete operations in a main table. (#2300 @zhanghaohit)
+- Task jobs will core dump when enabling `UnsafeRowOpt` with multiple threads in the Yarn cluster. (#2352 #2364 @tobegit3hub)
+- Other minor bug fixes (#2336 @dl239, #2337 @dl239, #2385 #2372 @aceforeverd, #2383 #2384 @vagetablechicken)
+
+### Code Refactoring
+#2310 @hv789, #2306 #2305 @yeya24, #2311 @Mattt47, #2368 @TBCCC, #2391 @PrajwalBorkar, #2392 @zahyaah, #2405 @wang-jiahua
+
 ## [0.6.0] - 2022-08-10
 
 ### Highlights
@@ -305,6 +789,24 @@ Removed
 - openmldb-0.2.0-linux.tar.gz targets on x86_64
 - aarch64 artifacts consider experimental
 
+[0.8.4]: https://github.com/4paradigm/OpenMLDB/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/4paradigm/OpenMLDB/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/4paradigm/OpenMLDB/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/4paradigm/OpenMLDB/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/4paradigm/OpenMLDB/compare/v0.7.3...v0.8.0
+[0.7.3]: https://github.com/4paradigm/OpenMLDB/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/4paradigm/OpenMLDB/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/4paradigm/OpenMLDB/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.9...v0.7.0
+[0.6.9]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/4paradigm/OpenMLDB/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/4paradigm/OpenMLDB/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/4paradigm/OpenMLDB/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/4paradigm/OpenMLDB/compare/v0.5.1...v0.5.2

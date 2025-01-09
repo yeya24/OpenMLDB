@@ -85,14 +85,11 @@ set(Boost_NO_BOOST_CMAKE ON)
 set(BOOST_ROOT "${CMAKE_PREFIX_PATH}")
 find_package(Boost COMPONENTS filesystem date_time regex REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_library(BRPC_LIBRARY brpc)
 
 set(Protobuf_USE_STATIC_LIBS ON)
 find_package(Protobuf 3.6 EXACT REQUIRED)
 message(STATUS "Found Protobuf Libraries: ${Protobuf_LIBRARIES}")
 
-find_library(GLOG_LIBRARY glog)
-find_library(GFLAGS_LIBRARY gflags)
 find_library(UNWIND_LIBRARY unwind)
 find_library(LEVELDB_LIBRARY leveldb)
 find_library(Z_LIBRARY z)
@@ -100,10 +97,10 @@ find_library(SNAPPY_LIBRARY snappy)
 
 message(STATUS "Boost libraries ${Boost_LIBRARIES}")
 message(STATUS "OpenSSL libraries ${OPENSSL_LIBRARIES}")
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(OS_LIB ${CMAKE_THREAD_LIBS_INIT} rt)
-    set(COMMON_LIBS ${Boost_LIBRARIES} ${LEVELDB_LIBRARY} ${Protobuf_LIBRARIES} ${GLOG_LIBRARY} ${UNWIND_LIBRARY} ${Z_LIBRARY} ${SNAPPY_LIBRARY} ${OPENSSL_LIBRARIES} dl)
-    set(BRPC_LIBS ${BRPC_LIBRARY} ${COMMON_LIBS})
+    set(COMMON_LIBS ${Boost_LIBRARIES} ${LEVELDB_LIBRARY} ${Protobuf_LIBRARIES} ${GLOG_LIBRARY} ${UNWIND_LIBRARY} ${Z_LIBRARY} ${SNAPPY_LIBRARY} ${OPENSSL_LIBRARIES} ${GFLAGS_LIBRARY} dl)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(OS_LIB
             ${CMAKE_THREAD_LIBS_INIT}
@@ -116,14 +113,24 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
             "-Wl,-U,_MallocExtension_ReleaseFreeMemory"
             "-Wl,-U,_ProfilerStart"
             "-Wl,-U,_ProfilerStop")
-    set(COMMON_LIBS ${Boost_LIBRARIES} ${LEVELDB_LIBRARY} ${Protobuf_LIBRARIES} ${GLOG_LIBRARY} ${Z_LIBRARY} ${SNAPPY_LIBRARY} ${OPENSSL_LIBRARIES} dl)
-    set(BRPC_LIBS ${BRPC_LIBRARY} ${COMMON_LIBS})
+    set(COMMON_LIBS ${Boost_LIBRARIES} ${LEVELDB_LIBRARY} ${Protobuf_LIBRARIES} ${GLOG_LIBRARY} ${Z_LIBRARY} ${SNAPPY_LIBRARY} ${OPENSSL_LIBRARIES} ${GFLAGS_LIBRARY} dl)
 endif ()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9.1")
+    # GNU implementation prior to 9.1 requires linking with -lstdc++fs
+    list(APPEND COMMON_LIBS stdc++fs)
+endif()
 
 configure_file(
         "${PROJECT_SOURCE_DIR}/src/version.h.in"
         "${PROJECT_SOURCE_DIR}/src/hybridse_version.h"
 )
+
+configure_file(
+        "${PROJECT_SOURCE_DIR}/src/case/test_cfg.h.in"
+        "${PROJECT_SOURCE_DIR}/src/case/test_cfg.h"
+)
+
 if (DEFINED ENV{CI})
   # suppress useless maven log (e.g download log) on CI environment
   set(MAVEN_FLAGS --batch-mode)
@@ -172,11 +179,13 @@ else()
 endif()
 
 include_directories(
-    ${PROJECT_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${LLVM_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
-    ${CMAKE_PREFIX_PATH}/include)
+    ${CMAKE_PREFIX_PATH}/include
+    ${farmhash_SOURCE_DIR}/src
+)
 
 link_directories(
     ${LLVM_LIBRARY_DIRS}

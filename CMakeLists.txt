@@ -19,7 +19,9 @@ if (POLICY CMP0086)
     cmake_policy(SET CMP0086 NEW)
 endif ()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake-modules")
+list(APPEND CMAKE_MODULE_PATH
+    "${CMAKE_SOURCE_DIR}/cmake-modules"
+    "${CMAKE_SOURCE_DIR}/cmake")
 
 project(openmldb)
 
@@ -28,13 +30,18 @@ if (CMAKE_BUILD_TYPE STREQUAL "")
 endif ()
 
 if (NOT DEFINED CMAKE_PREFIX_PATH)
-    set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/.deps/usr")
+    if (DEFINED ENV{THIRD_PARTY_DIR})
+        set(CMAKE_PREFIX_PATH $ENV{THIRD_PARTY_DIR})
+    else()
+        set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/.deps/usr")
+    endif()
 endif()
 
+message (STATUS "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
 message (STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 set(OPENMLDB_VERSION_MAJOR 0)
-set(OPENMLDB_VERSION_MINOR 6)
-set(OPENMLDB_VERSION_BUG 0)
+set(OPENMLDB_VERSION_MINOR 9)
+set(OPENMLDB_VERSION_BUG 3)
 
 function(get_commitid CODE_DIR COMMIT_ID)
     find_package(Git REQUIRED)
@@ -79,6 +86,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     add_definitions(-Wno-\#pragma-messages)
 endif ()
 add_definitions(-DHAVE_STDBOOL_H=1)
+
+# TODO(#1528): more strict flags
+# Specifically enable checking null pointers for nonnull functions
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wnonnull -Werror=nonnull")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -88,8 +100,10 @@ option(TESTING_ENABLE "Enable test" OFF)
 option(TCMALLOC_ENABLE "Enable TCMALLOC" ON)
 option(SQL_PYSDK_ENABLE "Enable sql pysdk" OFF)
 option(SQL_JAVASDK_ENABLE "Enable sql javasdk" OFF)
+option(INSTALL_CXXSDK "Enable sql cxxsdk install" OFF)
 option(MAC_TABLET_ENABLE "Enable Table on Mac OS" ON)
 option(COVERAGE_ENABLE "Enable Coverage" OFF)
+option(COVERAGE_NO_DEPS "Coverage without test deps, should ensure test built" OFF)
 option(SANITIZER_ENABLE "Enable AddressSanitizer in Debug mode" OFF)
 # add_library can reply on this variable
 # see https://cmake.org/cmake/help/latest/variable/BUILD_SHARED_LIBS.html#variable:BUILD_SHARED_LIBS
@@ -107,14 +121,11 @@ find_package(SWIG REQUIRED)
 include(UseSWIG)
 
 find_package(OpenSSL REQUIRED)
-find_library(BRPC_LIBRARY brpc)
 
 set(Protobuf_USE_STATIC_LIBS ON)
 find_package(Protobuf 3.6 EXACT REQUIRED)
 message(STATUS "Found Protobuf Libraries: ${Protobuf_LIBRARIES}")
 
-find_library(GLOG_LIBRARY glog)
-find_library(GFLAGS_LIBRARY gflags)
 find_library(UNWIND_LIBRARY unwind)
 find_library(LEVELDB_LIBRARY leveldb)
 find_library(Z_LIBRARY z)
@@ -127,6 +138,31 @@ else()
     find_library(RocksDB_LIBRARY rocksdb)
     set(RocksDB_LIB ${RocksDB_LIBRARY})
 endif()
+
+set(FETCHCONTENT_QUIET OFF)
+
+# contrib libs
+add_subdirectory(contrib EXCLUDE_FROM_ALL)
+
+if (BUILD_SHARED_LIBS)
+    # For shared build, gflags/glog requires shared lib,
+    # in case runtime problem arrise from java, a common issue is #3407:
+    # > ERROR: something wrong with flag 'logtostderr' in file 'src/logging.cc'. One possibility: file 'src/logging.cc' is being linked both statically and dynamically into this executable.
+    set(GLOG_LIBRARY glog::glog)
+    get_target_property(gflags_real gflags::gflags ALIASED_TARGET)
+    message(STATUS "link with gflags library: ${gflags_real}")
+    set(GFLAGS_LIBRARY gflags::gflags)
+else()
+    # 'CONFIG' is mandatory: pre-compiled thirdparty skip a Findgflags.cmake not work well
+    find_package(gflags REQUIRED COMPONENTS static CONFIG)
+    set(GFLAGS_LIBRARY ${gflags_LIBRARIES})
+
+    find_library(GLOG_LIBRARY NAMES libglog.a REQUIRED)
+endif()
+
+find_library(BRPC_LIBRARY NAMES libbrpc.a REQUIRED)
+message(STATUS "Found GFLAGS LIBRARY: ${GFLAGS_LIBRARY}")
+message(STATUS "Found GLOG LIBRARY: ${GLOG_LIBRARY}")
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(OS_LIB ${CMAKE_THREAD_LIBS_INIT} rt)
@@ -166,6 +202,7 @@ if (COVERAGE_ENABLE)
         message(FATAL_ERROR "Coverage is only supported on linux")
     endif ()
     find_program(LCOV_EXE NAMES lcov DOC "coverage requires lcov installed" REQUIRED)
+    message(STATUS "include CodeCoverage, if file not found, please git submodule update --init to get file")
     include(CodeCoverage)
     APPEND_COVERAGE_COMPILER_FLAGS()
 endif ()
@@ -186,7 +223,7 @@ set(LLVM_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/llvm")
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-llvm_map_components_to_libnames(LLVM_LIBS support core orcjit nativecodegen)
+llvm_map_components_to_libnames(LLVM_LIBS support core irreader orcjit nativecodegen)
 message(STATUS "Using LLVM components: ${LLVM_LIBS}")
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -196,6 +233,7 @@ set_target_properties(absl::time_zone PROPERTIES INTERFACE_LINK_LIBRARIES "\$<\$
 
 find_package(GTest REQUIRED)
 
+# TODO(hw): dup with hybridse root cmake, need cleanup
 list(
         APPEND
         ABSL_LIBS
@@ -212,9 +250,11 @@ list(
         absl::random_random
         absl::strings
         absl::strings_internal
+        absl::str_format
         absl::synchronization
         absl::time
-        absl::status)
+        absl::status
+        absl::statusor)
 
 find_package(ICU COMPONENTS i18n io uc data)
 if (NOT ICU_FOUND)
@@ -227,27 +267,16 @@ if (NOT ICU_FOUND)
 endif ()
 message(STATUS "Found ICU Libraries: ${ICU_LIBRARIES}")
 
-list(APPEND file_based_test_driver_LIBS
-        alternations
-        test_case_options
-        test_case_outputs
-        test_case_mode
-        logging
-        path
-        status
-        unified_diff_oss
-        ret_check
-        )
+find_library(zetasql_LIB zetasql)
+find_library(re2_LIB re2)
 set(ZETASQL_LIBS
-        zetasql
-        ${file_based_test_driver_LIBS}
+        ${zetasql_LIB}
         ${ABSL_LIBS}
-        re2
+        ${re2_LIB}
         ${ICU_LIBRARIES}
-        date_proto
-        timeofday_proto
-        latlng_proto
         )
+
+find_library(zookeeper_mt_LIB zookeeper_mt)
 
 if (TCMALLOC_ENABLE)
     set(CMAKE_EXE_LINKER_FLAGS "-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free ${CMAKE_EXE_LINKER_FLAGS}")
@@ -260,10 +289,13 @@ configure_file(
 include_directories(
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/hybridse/include
+  ${CMAKE_SOURCE_DIR}/hybridse/src
   ${CMAKE_BINARY_DIR}/hybridse/src
   ${LLVM_INCLUDE_DIRS}
   ${Boost_INCLUDE_DIRS}
-  ${CMAKE_PREFIX_PATH}/include)
+  ${CMAKE_PREFIX_PATH}/include
+  ${PROJECT_SOURCE_DIR}/contrib/rapidjson/include
+)
 
 link_directories(
     ${LLVM_LIBRARY_DIRS}
@@ -274,10 +306,15 @@ link_directories(
 add_subdirectory(src)
 
 if (COVERAGE_ENABLE AND CMAKE_COMPILER_IS_GNUCXX)
-  # FIXME(aceforeverd): api_server_test failed to run on debug mode, skip temporarily
-  SETUP_TARGET_FOR_COVERAGE_LCOV(NAME coverage
-    EXECUTABLE ctest --force-new-ctest-process --output-on-failure -E "api_server_test"
-    DEPENDENCIES ${test_list})
+  if (COVERAGE_NO_DEPS)
+        SETUP_TARGET_FOR_COVERAGE_LCOV(NAME coverage
+        EXECUTABLE ctest --force-new-ctest-process --output-on-failure -E "api_server_test")
+  else ()
+    # FIXME(aceforeverd): api_server_test failed to run on debug mode, skip temporarily
+    SETUP_TARGET_FOR_COVERAGE_LCOV(NAME coverage
+        EXECUTABLE ctest --force-new-ctest-process --output-on-failure -E "api_server_test"
+        DEPENDENCIES ${test_list})
+  endif ()
 endif ()
 
 
@@ -289,18 +326,32 @@ endif()
 
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 
-FILE(GLOB OPENMLDB_SCRIPTS "${CMAKE_SOURCE_DIR}/release/bin/*")
+FILE(GLOB OPENMLDB_BINS "${CMAKE_SOURCE_DIR}/release/bin/*")
+FILE(GLOB OPENMLDB_SBINS "${CMAKE_SOURCE_DIR}/release/sbin/*")
 FILE(GLOB OPENMLDB_CONFS "${CMAKE_SOURCE_DIR}/release/conf/*")
-FILE(GLOB OPENMLDB_TOOLS "${CMAKE_SOURCE_DIR}/tools/*")
+set(OPENMLDB_TOOLS "${CMAKE_SOURCE_DIR}/tools/")
 
 install(
-  FILES ${OPENMLDB_SCRIPTS}
+  FILES ${OPENMLDB_BINS}
   TYPE BIN
   PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
 )
+install(
+        FILES ${OPENMLDB_SBINS}
+        DESTINATION sbin
+        PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+)
 install(FILES ${OPENMLDB_CONFS} DESTINATION conf)
 install(
-  FILES ${OPENMLDB_TOOLS}
+  DIRECTORY ${OPENMLDB_TOOLS}
   DESTINATION tools
-  PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+  FILE_PERMISSIONS
+    OWNER_READ OWNER_EXECUTE OWNER_WRITE
+    GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE
+  DIRECTORY_PERMISSIONS
+    OWNER_READ OWNER_EXECUTE OWNER_WRITE
+    GROUP_READ GROUP_EXECUTE GROUP_WRITE
+    WORLD_READ WORLD_EXECUTE
 )
+install(DIRECTORY DESTINATION udf)

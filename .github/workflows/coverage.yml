@@ -17,6 +17,7 @@ on:
       - 'release/**'
       - 'tools/**'
       - '*.md'
+      - 'benchmark/**'
   pull_request:
     paths-ignore:
       - 'docs/**'
@@ -26,11 +27,14 @@ on:
       - 'release/**'
       - 'tools/**'
       - '*.md'
+      - 'benchmark/**'
   workflow_dispatch:
 
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/4paradigm/hybridsql:latest
     env:
       CTEST_PARALLEL_LEVEL: 1 # parallel test level for ctest (make test)
       CMAKE_BUILD_TYPE: Debug
@@ -39,22 +43,23 @@ jobs:
       SQL_JAVASDK_ENABLE: OFF
       NPROC: 2
       BUILD_SHARED_LIBS: ON
+      TESTING_ENABLE_STRIP: ON
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: download lcov
-        uses: actions/checkout@v3
-        with:
-          repository: linux-test-project/lcov
-          ref: master
-          path: lcov
-
-      - name: install lcov
-        working-directory: lcov
-        run: |
-          sudo make install
+#       - name: download lcov
+#         uses: actions/checkout@v4
+#         with:
+#           repository: linux-test-project/lcov
+#           ref: v1.16
+#           path: lcov
+# 
+#       - name: install lcov
+#         working-directory: lcov
+#         run: |
+#           sudo make install
 
       - name: coverage configure
         run: |
@@ -63,19 +68,46 @@ jobs:
       - name: start service
         run: |
           ./steps/ut_zookeeper.sh start
-
+      # make coverage-cpp will gen 16G build/ (no run), run test will take 2G more, so split make and test
       - name: Coverage CPP
         run: |
           make coverage-cpp
 
+      - name: debug
+        if: always()
+        run: |
+          du -d 1 -h build
+          df -h
+
+      - name: upload coverage
+        uses: actions/upload-artifact@v3
+        with:
+          # include the generated html report in build/coverage, great for local diagnose
+          name: coverage-cpp-${{ github.sha }}
+          path: |
+            build/coverage.*
+            build/coverage/
+          retention-days: 3
+
+  coverage-publish:
+    needs: ["coverage"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-cpp-${{ github.sha }}
+          path: build
+
       - name: Upload Coverage Report
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           files: build/coverage.info
-          name: coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          name: coverage-cpp
           fail_ci_if_error: true
           verbose: true
-
-      - name: stop service
-        run: |
-          ./steps/ut_zookeeper.sh stop

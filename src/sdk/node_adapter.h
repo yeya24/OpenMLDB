@@ -19,18 +19,23 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
+#include "absl/status/statusor.h"
 #include "node/node_manager.h"
 #include "proto/name_server.pb.h"
 #include "proto/type.pb.h"
+#include "sdk/option.h"
+#include "sdk/sql_delete_row.h"
 
 namespace openmldb {
 namespace sdk {
 
 class NodeAdapter {
  public:
-    static bool TransformToTableDef(::hybridse::node::CreatePlanNode* create_node, bool allow_empty_col_index,
+    static bool TransformToTableDef(::hybridse::node::CreatePlanNode* create_node,
                                     ::openmldb::nameserver::TableInfo* table, uint32_t default_replica_num,
                                     bool is_cluster_mode, hybridse::base::Status* status);
 
@@ -46,9 +51,24 @@ class NodeAdapter {
     static std::shared_ptr<hybridse::node::ConstNode> StringToData(const std::string& str,
                                                                    openmldb::type::DataType data_type);
 
+    static hybridse::sdk::Status ExtractCondition(const hybridse::node::BinaryExpr* expr_node,
+            const std::map<std::string, openmldb::type::DataType>& col_map,
+            const ::google::protobuf::RepeatedPtrField<::openmldb::common::ColumnKey>& indexs,
+            std::vector<Condition>* condition_vec, std::vector<Condition>* parameter_vec);
+    static hybridse::sdk::Status ExtractDeleteOption(
+            const ::google::protobuf::RepeatedPtrField<::openmldb::common::ColumnKey>& indexs,
+            const std::vector<Condition>& condition_vec,
+            DeleteOption* option);
+
+    static absl::StatusOr<std::string> ExtractUserOption(const hybridse::node::OptionsMap& map);
+
+ private:
+    static hybridse::sdk::Status CheckCondition(
+            const ::google::protobuf::RepeatedPtrField<::openmldb::common::ColumnKey>& indexs,
+            const std::vector<Condition>& condition_vec);
     static hybridse::sdk::Status ParseExprNode(const hybridse::node::BinaryExpr* expr_node,
             const std::map<std::string, openmldb::type::DataType>& col_map,
-            std::map<std::string, std::string>* condition_map, std::map<std::string, int>* parameter_map);
+            std::vector<Condition>* condition_vec, std::vector<Condition>* parameter_vec);
 };
 
 }  // namespace sdk

@@ -6,31 +6,33 @@ on:
       JAVA_SDK_VERSION:
         description: 'java sdk version'
         required: true
-        default: '0.4.2'
+        default: '0.7.2'
       OPENMLDB_SERVER_VERSION:
         description: 'openmldb server version'
         required: true
-        default: '0.4.2'
+        default: '0.7.2'
       PYTHON_SDK_VERSION:
         description: 'python sdk version'
         required: true
-        default: '0.4.2'
+        default: '0.7.2'
       BATCH_VERSION:
         description: 'batch version'
         required: true
-        default: '0.4.2-allinone'
+        default: '0.7.2-allinone'
       DIFF_VERSIONS:
         description: 'diff versions'
         required: false
-        default: '0.4.0'
+        default: '0.7.0'
       EXEC_TEST_TYPE:
-        description: 'Which tests need to be executed? The options are all, python, java, batch, cli, standalone-cli and apiserver'
+        description: 'Which tests need to be executed? The options are all, python, java, batch, cli, standalone-cli, apiserver, yarn'
         required: true
         default: 'all'
 
 env:
   GIT_SUBMODULE_STRATEGY: recursive
   HYBRIDSE_SOURCE:
+  # ref https://github.blog/changelog/2024-03-07-github-actions-all-actions-will-run-on-node20-instead-of-node16-by-default/
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
 #  java-sdk-test-standalone-0:
@@ -83,6 +85,8 @@ jobs:
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2
@@ -99,12 +103,38 @@ jobs:
           check_name: Java SDK Test Cluster0 PKG Report
           comment_title: Java SDK Test Cluster0 PKG Report
 
+  java-sdk-yarn:
+    if: ${{ github.event.inputs.EXEC_TEST_TYPE == 'all' || github.event.inputs.EXEC_TEST_TYPE == 'yarn' }}
+    runs-on: self-hosted
+    container:
+      image: ghcr.io/4paradigm/hybridsql:latest
+    env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+      OS: linux
+    steps:
+      - uses: actions/checkout@v2
+      - name: modify-properties
+        run: sh test/steps/modify-properties.sh ${{ github.event.inputs.JAVA_SDK_VERSION }} ${{ github.event.inputs.OPENMLDB_SERVER_VERSION }} ${{ github.event.inputs.PYTHON_SDK_VERSION }} ${{ github.event.inputs.BATCH_VERSION }} ${{ github.event.inputs.DIFF_VERSIONS }}
+      - name: test
+        run: source /root/.bashrc && bash test/steps/openmldb-sdk-test-java.sh -b PKG -c test_yarn.xml -d yarn -l "0"
+      - name: TEST Results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v1
+        with:
+          files: test/integration-test/openmldb-test-java/openmldb-sdk-test/target/surefire-reports/TEST-*.xml
+          comment_mode: "create new"
+          check_name: Java SDK Test Cluster0 PKG Report
+          comment_title: Java SDK Test Cluster0 PKG Report
+
   java-sdk-test-cluster-1:
     if: ${{ github.event.inputs.EXEC_TEST_TYPE == 'all' || github.event.inputs.EXEC_TEST_TYPE == 'java' }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2
@@ -168,6 +198,8 @@ jobs:
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2
@@ -177,7 +209,7 @@ jobs:
         run: source /root/.bashrc && bash test/steps/openmldb-sdk-test-python.sh -b PKG -d standalone -l "0"
       - name: upload test results
         if: always()
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: python-sdk-standalone-0-pkg-${{ github.sha }}
           path: |
@@ -205,6 +237,8 @@ jobs:
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2
@@ -214,7 +248,7 @@ jobs:
         run: source /root/.bashrc && bash test/steps/openmldb-sdk-test-python.sh -b PKG -d standalone -l "1,2,3,4,5"
       - name: upload test results
         if: always()
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: python-sdk-standalone-1-pkg-${{ github.sha }}
           path: |
@@ -226,6 +260,8 @@ jobs:
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2
@@ -247,6 +283,8 @@ jobs:
     container:
       image: ghcr.io/4paradigm/hybridsql:latest
     env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node16
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       OS: linux
     steps:
       - uses: actions/checkout@v2

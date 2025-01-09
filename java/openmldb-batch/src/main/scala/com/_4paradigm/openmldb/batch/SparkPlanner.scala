@@ -19,23 +19,24 @@ package com._4paradigm.openmldb.batch
 import com._4paradigm.hybridse.`type`.TypeOuterClass.Database
 import com._4paradigm.hybridse.node.{DataType, JoinType}
 import com._4paradigm.hybridse.sdk.{SqlEngine, UnsupportedHybridSeException}
-import com._4paradigm.hybridse.vm.{CoreAPI, Engine, PhysicalConstProjectNode, PhysicalDataProviderNode,
-  PhysicalGroupAggrerationNode, PhysicalGroupNode, PhysicalJoinNode, PhysicalLimitNode, PhysicalLoadDataNode,
-  PhysicalOpNode, PhysicalOpType, PhysicalProjectNode, PhysicalRenameNode, PhysicalSelectIntoNode,
-  PhysicalSimpleProjectNode, PhysicalSortNode, PhysicalTableProjectNode, PhysicalWindowAggrerationNode, ProjectType}
+import com._4paradigm.hybridse.vm.{CoreAPI, Engine, PhysicalConstProjectNode, PhysicalCreateTableNode,
+  PhysicalDataProviderNode, PhysicalFilterNode, PhysicalGroupAggrerationNode, PhysicalGroupNode, PhysicalInsertNode,
+  PhysicalJoinNode, PhysicalLimitNode, PhysicalLoadDataNode, PhysicalOpNode, PhysicalOpType, PhysicalProjectNode,
+  PhysicalRenameNode, PhysicalSelectIntoNode, PhysicalSetOperationNode, PhysicalSimpleProjectNode, PhysicalSortNode,
+  PhysicalTableProjectNode, PhysicalWindowAggrerationNode, ProjectType}
 import com._4paradigm.openmldb.batch.api.OpenmldbSession
-import com._4paradigm.openmldb.batch.nodes.{ConstProjectPlan, DataProviderPlan, GroupByAggregationPlan, GroupByPlan,
-  JoinPlan, LimitPlan, LoadDataPlan, RenamePlan, RowProjectPlan, SelectIntoPlan, SimpleProjectPlan, SortByPlan,
-  WindowAggPlan}
-import com._4paradigm.openmldb.batch.utils.{DataTypeUtil, GraphvizUtil, HybridseUtil, NodeIndexInfo, NodeIndexType}
+import com._4paradigm.openmldb.batch.nodes.{ConstProjectPlan, CreateTablePlan, DataProviderPlan, FilterPlan,
+  GroupByAggregationPlan, GroupByPlan, InsertPlan, JoinPlan, LimitPlan, LoadDataPlan, RenamePlan, RowProjectPlan,
+  SelectIntoPlan, SetOperationPlan, SimpleProjectPlan, SortByPlan, WindowAggPlan}
+import com._4paradigm.openmldb.batch.utils.{DataTypeUtil, ExternalUdfUtil, GraphvizUtil, HybridseUtil, NodeIndexInfo,
+  NodeIndexType}
 import com._4paradigm.openmldb.sdk.impl.SqlClusterExecutor
 import com._4paradigm.std.VectorDataType
 import org.apache.hadoop.fs.{FileSystem, Path}
-import org.apache.spark.SparkFiles
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.slf4j.LoggerFactory
 
-import scala.collection.JavaConversions.seqAsJavaList
+import scala.collection.JavaConverters.seqAsJavaList
 import scala.collection.mutable
 import scala.reflect.io.File
 
@@ -263,12 +264,18 @@ class SparkPlanner(session: SparkSession, config: OpenmldbBatchConfig, sparkAppN
         RenamePlan.gen(ctx, PhysicalRenameNode.CastFrom(root), children.head)
       case PhysicalOpType.kPhysicalOpSortBy =>
         SortByPlan.gen(ctx, PhysicalSortNode.CastFrom(root), children.head)
-      //case PhysicalOpType.kPhysicalOpFilter =>
-      //  FilterPlan.gen(ctx, PhysicalFilterNode.CastFrom(root), children.head)
+      case PhysicalOpType.kPhysicalOpFilter =>
+        FilterPlan.gen(ctx, PhysicalFilterNode.CastFrom(root), children.head)
       case PhysicalOpType.kPhysicalOpLoadData =>
         LoadDataPlan.gen(ctx, PhysicalLoadDataNode.CastFrom(root))
       case PhysicalOpType.kPhysicalOpSelectInto =>
         SelectIntoPlan.gen(ctx, PhysicalSelectIntoNode.CastFrom(root), children.head)
+      case PhysicalOpType.kPhysicalCreateTable =>
+        CreateTablePlan.gen(ctx, PhysicalCreateTableNode.CastFrom(root))
+      case PhysicalOpType.kPhysicalOpSetOperation =>
+        SetOperationPlan.gen(ctx, PhysicalSetOperationNode.CastFrom(root), children)
+      case PhysicalOpType.kPhysicalOpInsert =>
+        InsertPlan.gen(ctx, PhysicalInsertNode.CastFrom(root))
       case _ =>
         throw new UnsupportedHybridSeException(s"Plan type $opType not supported")
     }
@@ -337,12 +344,14 @@ class SparkPlanner(session: SparkSession, config: OpenmldbBatchConfig, sparkAppN
     }
 
     try {
-      sqlEngine = new SqlEngine(dbs, engineOptions)
+      sqlEngine = new SqlEngine(seqAsJavaList(dbs), engineOptions)
       val engine = sqlEngine.getEngine
 
       // TODO(tobe): If use SparkPlanner instead of OpenmldbSession, these will be null
       if (config.openmldbZkCluster.nonEmpty && config.openmldbZkRootPath.nonEmpty
         && openmldbSession != null && openmldbSession.openmldbCatalogService != null) {
+
+        // TODO(tobe): Refactor with ExternalUdfUtil.executorRegisterExternalUdf
         val externalFunMap = openmldbSession.openmldbCatalogService.getExternalFunctionsMap()
         for ((functionName, functionProto) <- externalFunMap){
           logger.info("Register the external function: " + functionProto)
@@ -353,16 +362,26 @@ class SparkPlanner(session: SparkSession, config: OpenmldbBatchConfig, sparkAppN
           })
 
           // Get the correct file name which is submitted by spark-submit
-          // TODO(tobe): Only work for spark-submit jobs and can not load local library file when running in IDE
           val soFileName = functionProto.getFile.split("/").last
-          // For local mode, spark does not copy the fail in driver, refer to
-          // https://stackoverflow.com/questions/34900023/read-files-sent-with-spark-submit-by-the-driver
-          val soFilePath = SparkFiles.get(soFileName)
-          if (File(soFilePath).exists) {
-            engine.RegisterExternalFunction(functionName, returnDataType, argsDataType, functionProto.getIsAggregate,
-              soFilePath)
+          val absoluteSoFilePath = if (config.taskmanagerExternalFunctionDir.endsWith("/")) {
+            config.taskmanagerExternalFunctionDir + soFileName
           } else {
-            logger.warn("The dynamic library file does not exit in " + soFilePath)
+            config.taskmanagerExternalFunctionDir + "/" + soFileName
+          }
+
+          val driverSoFilePath = ExternalUdfUtil.getDriverFilePath(openmldbSession.isYarnMode(),
+            openmldbSession.isClusterMode(), absoluteSoFilePath)
+          logger.warn("Get driver so file path: " + driverSoFilePath)
+
+          if (File(driverSoFilePath).exists) {
+            val ret = Engine.RegisterExternalFunction(functionName, returnDataType, functionProto.getReturnNullable,
+              argsDataType, functionProto.getArgNullable, functionProto.getIsAggregate,
+              driverSoFilePath)
+            if (!ret.isOK) {
+                logger.warn("Register external function failed: " + functionName + ", " + ret.str)
+            }
+          } else {
+            logger.warn("The dynamic library file does not exit in " + driverSoFilePath)
           }
 
         }
@@ -377,7 +396,7 @@ class SparkPlanner(session: SparkSession, config: OpenmldbBatchConfig, sparkAppN
       case e: Exception =>
         println("Get exception: " + e.getMessage)
         e.printStackTrace()
-        body(sqlEngine)
+        throw e
     } finally {
       if (sqlEngine != null) {
         sqlEngine.close()
@@ -385,5 +404,3 @@ class SparkPlanner(session: SparkSession, config: OpenmldbBatchConfig, sparkAppN
     }
   }
 }
-
-

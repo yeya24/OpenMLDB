@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -46,7 +47,8 @@ struct TabletInfo {
 
 class NsClient : public Client {
  public:
-    explicit NsClient(const std::string& endpoint, const std::string& real_endpoint);
+    explicit NsClient(const std::string& endpoint, const std::string& real_endpoint,
+                      const openmldb::authn::AuthToken auth_token = openmldb::authn::ServiceToken{"default"});
     ~NsClient() override = default;
 
     int Init() override;
@@ -59,10 +61,14 @@ class NsClient : public Client {
 
     bool CreateDatabase(const std::string& db, std::string& msg, bool if_not_exists = false);  // NOLINT
 
+    base::Status CreateDatabaseRemote(const std::string& db, const ::openmldb::nameserver::ZoneInfo& zone_info);
+
+    base::Status DropDatabaseRemote(const std::string& db, const ::openmldb::nameserver::ZoneInfo& zone_info);
+
     bool ShowDatabase(std::vector<std::string>* dbs,
                       std::string& msg);  // NOLINT
 
-    bool DropDatabase(const std::string& db, std::string& msg);  // NOLINT
+    bool DropDatabase(const std::string& db, std::string& msg, bool if_exists = false);  // NOLINT
 
     bool ShowTablet(std::vector<TabletInfo>& tablets,  // NOLINT
                     std::string& msg);                 // NOLINT
@@ -90,22 +96,34 @@ class NsClient : public Client {
     bool MakeSnapshot(const std::string& name, const std::string& db, uint32_t pid, uint64_t end_offset,
                       std::string& msg);  // NOLINT
 
-    bool ShowOPStatus(::openmldb::nameserver::ShowOPStatusResponse& response,    // NOLINT
-                      const std::string& name, uint32_t pid, std::string& msg);  // NOLINT
+    base::Status ShowOPStatus(const std::string& name, uint32_t pid, nameserver::ShowOPStatusResponse* response);
 
-    bool CancelOP(uint64_t op_id, std::string& msg);  // NOLINT
+    base::Status ShowOPStatus(uint64_t op_id, ::openmldb::nameserver::ShowOPStatusResponse* response);
+
+    base::Status CancelOP(uint64_t op_id);
+    base::Status DeleteOP(std::optional<uint64_t> op_id, openmldb::api::TaskStatus status);
 
     bool AddTableField(const std::string& table_name, const ::openmldb::common::ColumnDesc& column_desc,
                        std::string& msg);  // NOLINT
 
-    bool CreateTable(const ::openmldb::nameserver::TableInfo& table_info,
-                     const bool create_if_not_exist,
+    bool CreateTable(const ::openmldb::nameserver::TableInfo& table_info, const bool create_if_not_exist,
                      std::string& msg);  // NOLINT
 
     bool DropTable(const std::string& name, std::string& msg);  // NOLINT
 
+    bool PutUser(const std::string& host, const std::string& name, const std::string& password);  // NOLINT
+
+    bool PutPrivilege(const std::optional<std::string> target_type, const std::string database,
+                      const std::string target, const std::vector<std::string> privileges, const bool is_all_privileges,
+                      const std::vector<std::string> grantees,
+                      const ::openmldb::nameserver::PrivilegeLevel privilege_level);  // NOLINT
+
+    bool DeleteUser(const std::string& host, const std::string& name);  // NOLINT
+
     bool DropTable(const std::string& db, const std::string& name,
                    std::string& msg);  // NOLINT
+
+    base::Status TruncateTable(const std::string& db, const std::string& name);
 
     bool SyncTable(const std::string& name, const std::string& cluster_alias, uint32_t pid,
                    std::string& msg);  // NOLINT
@@ -139,14 +157,12 @@ class NsClient : public Client {
                            const ::openmldb::nameserver::ZoneInfo& zone_info,
                            std::string& msg);  // NOLINT
 
-    bool AddReplica(const std::string& name, const std::set<uint32_t>& pid_set, const std::string& endpoint,
-                    std::string& msg);  // NOLINT
+    base::Status AddReplica(const std::string& name, const std::set<uint32_t>& pid_set, const std::string& endpoint);
 
     bool AddReplicaNS(const std::string& name, const std::vector<std::string>& endpoint_vec, uint32_t pid,
                       const ::openmldb::nameserver::ZoneInfo& zone_info, const ::openmldb::api::TaskInfo& task_info);
 
-    bool DelReplica(const std::string& name, const std::set<uint32_t>& pid_set, const std::string& endpoint,
-                    std::string& msg);  // NOLINT
+    base::Status DelReplica(const std::string& name, const std::set<uint32_t>& pid_set, const std::string& endpoint);
 
     bool ConfSet(const std::string& key, const std::string& value,
                  std::string& msg);  // NOLINT
@@ -154,20 +170,19 @@ class NsClient : public Client {
     bool ConfGet(const std::string& key, std::map<std::string, std::string>& conf_map,  // NOLINT
                  std::string& msg);                                                     // NOLINT
 
-    bool ChangeLeader(const std::string& name, uint32_t pid,
-                      std::string& candidate_leader,  // NOLINT
-                      std::string& msg);              // NOLINT
+    base::Status ChangeLeader(const std::string& name, uint32_t pid,
+                              std::string& candidate_leader);  // NOLINT
 
     bool OfflineEndpoint(const std::string& endpoint, uint32_t concurrency,
                          std::string& msg);  // NOLINT
 
-    bool Migrate(const std::string& src_endpoint, const std::string& name, const std::set<uint32_t>& pid_set,
-                 const std::string& des_endpoint, std::string& msg);  // NOLINT
+    base::Status Migrate(const std::string& src_endpoint, const std::string& name, const std::set<uint32_t>& pid_set,
+                         const std::string& des_endpoint);
 
     bool RecoverEndpoint(const std::string& endpoint, bool need_restore, uint32_t concurrency,
                          std::string& msg);  // NOLINT
 
-    bool RecoverTable(const std::string& name, uint32_t pid, const std::string& endpoint, std::string& msg);  // NOLINT
+    base::Status RecoverTable(const std::string& name, uint32_t pid, const std::string& endpoint);
 
     bool ConnectZK(std::string& msg);  // NOLINT
 
@@ -180,13 +195,14 @@ class NsClient : public Client {
                            ::openmldb::nameserver::TablePartition& table_partition,  // NOLINT
                            std::string& msg);                                        // NOLINT
 
-    bool UpdateTableAliveStatus(const std::string& endpoint,
-                                std::string& name,  // NOLINT
-                                uint32_t pid, bool is_alive,
-                                std::string& msg);  // NOLINT
+    base::Status UpdateTableAliveStatus(const std::string& endpoint, const std::string& name, uint32_t pid,
+                                        bool is_alive);
 
     bool UpdateTTL(const std::string& name, const ::openmldb::type::TTLType& type, uint64_t abs_ttl, uint64_t lat_ttl,
                    const std::string& ts_name, std::string& msg);  // NOLINT
+
+    bool UpdateTTL(const std::string& db, const std::string& name, const ::openmldb::type::TTLType& type,
+                   uint64_t abs_ttl, uint64_t lat_ttl, const std::string& ts_name, std::string& msg);  // NOLINT
 
     bool AddReplicaClusterByNs(const std::string& alias, const std::string& name, uint64_t term,
                                std::string& msg);  // NOLINT
@@ -204,21 +220,18 @@ class NsClient : public Client {
     bool RemoveReplicaCluster(const std::string& alias,
                               std::string& msg);  // NOLINT
 
-    bool SwitchMode(const ::openmldb::nameserver::ServerMode& mode,
-                    std::string& msg);  // NOLINT
+    bool SwitchMode(const ::openmldb::nameserver::ServerMode& mode, std::string& msg);  // NOLINT
 
     bool AddIndex(const std::string& table_name, const ::openmldb::common::ColumnKey& column_key,
                   std::vector<openmldb::common::ColumnDesc>* cols,
                   std::string& msg);  // NOLINT
 
-    bool AddIndex(const std::string& db_name,
-                  const std::string& table_name,
-                  const ::openmldb::common::ColumnKey& column_key,
-                  std::vector<openmldb::common::ColumnDesc>* cols,
+    bool AddIndex(const std::string& db_name, const std::string& table_name,
+                  const ::openmldb::common::ColumnKey& column_key, std::vector<openmldb::common::ColumnDesc>* cols,
                   std::string& msg);  // NOLINT
 
     base::Status AddMultiIndex(const std::string& db, const std::string& table_name,
-            const std::vector<::openmldb::common::ColumnKey>& column_keys);
+                               const std::vector<::openmldb::common::ColumnKey>& column_keys, bool skip_load_data);
 
     bool DeleteIndex(const std::string& table_name, const std::string& idx_name,
                      std::string& msg);  // NOLINT
@@ -241,6 +254,11 @@ class NsClient : public Client {
                        std::string* msg);
 
     base::Status UpdateOfflineTableInfo(const nameserver::TableInfo& table_info);
+
+    base::Status DeploySQL(
+        const ::openmldb::api::ProcedureInfo& sp_info,
+        const std::map<std::string, std::map<std::string, std::vector<::openmldb::common::ColumnKey>>>& new_index_map,
+        uint64_t* op_id);
 
  private:
     ::openmldb::RpcClient<::openmldb::nameserver::NameServer_Stub> client_;

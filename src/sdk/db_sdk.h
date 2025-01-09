@@ -28,7 +28,9 @@
 #include "client/ns_client.h"
 #include "client/tablet_client.h"
 #include "client/taskmanager_client.h"
+#include "codec/encrypt.h"
 #include "common/thread_pool.h"
+#include "sdk/options.h"
 #include "vm/catalog.h"
 #include "vm/engine.h"
 #include "zk/zk_client.h"
@@ -43,11 +45,13 @@ struct ClusterOptions {
     int32_t zk_session_timeout = 2000;
     int32_t zk_log_level = 3;
     std::string zk_log_file;
+    std::string zk_auth_schema = "digest";
+    std::string zk_cert;
     std::string to_string() {
         std::stringstream ss;
         ss << "zk options [cluster:" << zk_cluster << ", path:" << zk_path
-           << ", zk_session_timeout:" << zk_session_timeout
-           << ", log_level:" << zk_log_level << ", log_file:" << zk_log_file << "]";
+           << ", zk_session_timeout:" << zk_session_timeout << ", log_level:" << zk_log_level
+           << ", log_file:" << zk_log_file << ", zk_auth_schema:" << zk_auth_schema << ", zk_cert:" << zk_cert << "]";
         return ss.str();
     }
 };
@@ -77,6 +81,7 @@ class DBSDK {
 
     std::shared_ptr<::openmldb::client::TaskManagerClient> GetTaskManagerClient();
 
+    std::vector<std::string> GetAllDbs();
     uint32_t GetTableId(const std::string& db, const std::string& tname);
     std::shared_ptr<::openmldb::nameserver::TableInfo> GetTableInfo(const std::string& db, const std::string& tname);
     std::vector<std::shared_ptr<::openmldb::nameserver::TableInfo>> GetTables(const std::string& db);
@@ -89,6 +94,9 @@ class DBSDK {
     std::shared_ptr<::openmldb::catalog::TabletAccessor> GetTablet(const std::string& db, const std::string& name);
     std::shared_ptr<::openmldb::catalog::TabletAccessor> GetTablet(const std::string& db, const std::string& name,
                                                                    uint32_t pid);
+    std::vector<std::shared_ptr<::openmldb::catalog::TabletAccessor>> GetTabletFollowers(const std::string& db,
+                                                                                         const std::string& name,
+                                                                                         uint32_t pid);
     std::shared_ptr<::openmldb::catalog::TabletAccessor> GetTablet(const std::string& db, const std::string& name,
                                                                    const std::string& pk);
 
@@ -99,6 +107,8 @@ class DBSDK {
 
     virtual bool GetNsAddress(std::string* endpoint, std::string* real_endpoint) = 0;
 
+    virtual std::shared_ptr<BasicRouterOptions> GetOptions() const = 0;
+
     bool RegisterExternalFun(const std::shared_ptr<openmldb::common::ExternalFun>& fun);
     bool RemoveExternalFun(const std::string& name);
 
@@ -106,9 +116,6 @@ class DBSDK {
     virtual bool GetTaskManagerAddress(std::string* endpoint, std::string* real_endpoint) = 0;
     // build client_manager, then create a new catalog, replace the catalog in engine
     virtual bool BuildCatalog() = 0;
-
-    DBSDK() : client_manager_(new catalog::ClientManager), catalog_(new catalog::SDKCatalog(client_manager_)) {}
-
     static std::string GetFunSignature(const openmldb::common::ExternalFun& fun);
     bool InitExternalFun();
 
@@ -131,7 +138,7 @@ class DBSDK {
 
 class ClusterSDK : public DBSDK {
  public:
-    explicit ClusterSDK(const ClusterOptions& options);
+    explicit ClusterSDK(const std::shared_ptr<SQLRouterOptions>& options);
 
     ~ClusterSDK() override;
     bool Init() override;
@@ -139,11 +146,12 @@ class ClusterSDK : public DBSDK {
     bool TriggerNotify(::openmldb::type::NotifyType type) const override;
 
     zk::ZkClient* GetZkClient() override { return zk_client_; }
-    const ClusterOptions& GetClusterOptions() const { return options_; }
 
     bool GetNsAddress(std::string* endpoint, std::string* real_endpoint) override;
 
     void RefreshExternalFun(const std::vector<std::string>& funs);
+
+    std::shared_ptr<BasicRouterOptions> GetOptions() const override { return options_; }
 
  protected:
     bool BuildCatalog() override;
@@ -159,7 +167,7 @@ class ClusterSDK : public DBSDK {
     void RefreshTaskManagerClient();
 
  private:
-    ClusterOptions options_;
+    std::shared_ptr<SQLRouterOptions> options_;
     uint64_t session_id_;
     std::string table_root_path_;
     std::string sp_root_path_;
@@ -167,14 +175,23 @@ class ClusterSDK : public DBSDK {
     std::string globalvar_changed_notify_path_;
     std::string leader_path_;
     std::string taskmanager_leader_path_;
-
+    // CheckZk will be called periodically, so we don't need to check zk_client_ before using it
+    // if failed, just retry
     ::openmldb::zk::ZkClient* zk_client_;
     ::baidu::common::ThreadPool pool_;
 };
 
 class StandAloneSDK : public DBSDK {
  public:
-    StandAloneSDK(std::string host, int port) : host_(std::move(host)), port_(port) {}
+    explicit StandAloneSDK(const std::shared_ptr<StandaloneOptions> options) : options_(options) {
+        if (!options->user.empty()) {
+            client_manager_ = std::make_shared<::openmldb::catalog::ClientManager>(
+                authn::UserToken{options->user, codec::Encrypt(options->password)});
+        } else {
+            client_manager_ = std::make_shared<::openmldb::catalog::ClientManager>();
+        }
+        catalog_ = std::make_shared<catalog::SDKCatalog>(client_manager_);
+    }
 
     ~StandAloneSDK() override { pool_.Stop(false); }
     bool Init() override;
@@ -193,15 +210,17 @@ class StandAloneSDK : public DBSDK {
         return false;
     }
 
-    const std::string& GetHost() const { return host_; }
+    std::shared_ptr<BasicRouterOptions> GetOptions() const override { return options_; }
 
-    int GetPort() const { return port_; }
+    const std::string& GetHost() const { return options_->host; }
+
+    int GetPort() const { return options_->port; }
 
     // Before connecting to ns, we only have the host&port
     // NOTICE: when we call this method, we do not have the correct ns client, do not GetNsClient.
     bool GetNsAddress(std::string* endpoint, std::string* real_endpoint) override {
         std::stringstream ss;
-        ss << host_ << ":" << port_;
+        ss << GetHost() << ":" << GetPort();
         *endpoint = ss.str();
         *real_endpoint = ss.str();
         return true;
@@ -224,8 +243,7 @@ class StandAloneSDK : public DBSDK {
     }
 
  private:
-    std::string host_;
-    int port_;
+    std::shared_ptr<StandaloneOptions> options_;
     ::baidu::common::ThreadPool pool_{1};
 };
 

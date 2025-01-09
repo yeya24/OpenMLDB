@@ -19,10 +19,16 @@
 
 #include <string>
 
+#include "absl/strings/str_cat.h"
+
 #include "base/slice.h"
+#include "version.h"  // NOLINT
 
 namespace openmldb {
 namespace base {
+
+inline const std::string NOTICE_URL = "https://openmldb.ai/docs/zh/v" + std::to_string(OPENMLDB_VERSION_MAJOR) + "." +
+    std::to_string(OPENMLDB_VERSION_MINOR) + "/openmldb_sql/notice.html";
 
 enum ReturnCode {
     kError = -1,
@@ -86,6 +92,11 @@ enum ReturnCode {
     kProcedureAlreadyExists = 157,
     kProcedureNotFound = 158,
     kCreateFunctionFailed = 159,
+    kExceedMaxMemory = 160,
+    kInvalidArgs = 161,
+    kCheckIndexFailed = 162,
+    kCatalogUpdateFailed = 163,
+    kExceedPutMemoryLimit = 164,
     kNameserverIsNotLeader = 300,
     kAutoFailoverIsEnabled = 301,
     kEndpointIsNotExist = 302,
@@ -120,6 +131,10 @@ enum ReturnCode {
     kCheckParameterFailed = 331,
     kCreateProcedureFailedOnTablet = 332,
     kCreateFunctionFailedOnTablet = 333,
+    kOPAlreadyExists = 334,
+    kOffsetMismatch = 335,
+    kGetTabletFailed = 336,
+    kTruncateTableFailed = 337,
     kReplicaClusterAliasDuplicate = 400,
     kConnectRelicaClusterZkFailed = 401,
     kNotSameReplicaName = 402,
@@ -166,15 +181,22 @@ enum ReturnCode {
 
     kSQLCompileError = 1000,
     kSQLRunError = 1001,
-    kRPCRunError = 1002
+    kRPCRunError = 1002,
+    kServerConnError = 1003,
+    kRPCError = 1004,  // brpc controller error
+
+    // auth
+    kFlushPrivilegesFailed = 1100,  // brpc controller error
+    kNotAuthorized = 1101  // brpc controller error
 };
 
 struct Status {
-    Status(int code_i, std::string msg_i) : code(code_i), msg(msg_i) {}
+    Status(int code_i, const std::string& msg_i) : code(code_i), msg(msg_i) {}
     Status() : code(ReturnCode::kOk), msg("ok") {}
     inline bool OK() const { return code == ReturnCode::kOk; }
     inline const std::string& GetMsg() const { return msg; }
     inline int GetCode() const { return code; }
+    inline std::string ToString() const { return absl::StrCat("ReturnCode[", code, "]", msg); }
     int code;
     std::string msg;
 };

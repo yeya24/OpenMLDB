@@ -23,6 +23,7 @@
 
 #include "brpc/controller.h"
 #include "butil/iobuf.h"
+#include "schema/index_util.h"
 #include "proto/tablet.pb.h"
 #include "sdk/base_impl.h"
 #include "sdk/codec_sdk.h"
@@ -53,6 +54,10 @@ class ResultSetSQL : public ::hybridse::sdk::ResultSet {
 
     static std::shared_ptr<::hybridse::sdk::ResultSet> MakeResultSet(
         const std::vector<std::string>& fields, const std::vector<std::vector<std::string>>& records,
+        ::hybridse::sdk::Status* status);
+
+    static std::shared_ptr<::hybridse::sdk::ResultSet> MakeResultSet(
+        const ::openmldb::schema::PBSchema& schema, const std::vector<std::vector<std::string>>& records,
         ::hybridse::sdk::Status* status);
 
     bool Init();
@@ -90,6 +95,12 @@ class ResultSetSQL : public ::hybridse::sdk::ResultSet {
     const ::hybridse::sdk::Schema* GetSchema() override { return result_set_base_->GetSchema(); }
 
     int32_t Size() override { return result_set_base_->Size(); }
+
+    void CopyTo(hybridse::sdk::ByteArrayPtr buf) override {
+        return result_set_base_->CopyTo(reinterpret_cast<void*>(buf));
+    }
+
+    int32_t GetDataLength() override { return result_set_base_->GetDataLength(); }
 
  private:
     ::hybridse::vm::Schema schema_;
@@ -206,6 +217,9 @@ class MultipleResultSetSQL : public ::hybridse::sdk::ResultSet {
         return total_size;
     }
 
+    int32_t GetDataLength() override { return 0; }
+    void CopyTo(hybridse::sdk::ByteArrayPtr buf) override { }
+
  private:
     std::vector<std::shared_ptr<ResultSetSQL>> result_set_list_;
     uint32_t result_set_idx_;
@@ -213,6 +227,56 @@ class MultipleResultSetSQL : public ::hybridse::sdk::ResultSet {
     uint32_t result_idx_;
     std::shared_ptr<ResultSetSQL> result_set_base_;
 };
+
+class ReadableResultSetSQL : public ::hybridse::sdk::ResultSet {
+ public:
+    explicit ReadableResultSetSQL(const std::shared_ptr<::hybridse::sdk::ResultSet>& rs) : rs_(rs) {}
+
+    ~ReadableResultSetSQL() {}
+
+    bool Reset() override { return rs_->Reset(); }
+
+    bool Next() override { return rs_->Next(); }
+
+    bool IsNULL(int index) override { return rs_->IsNULL(index); }
+
+    bool GetString(uint32_t index, std::string* str) override { return rs_->GetString(index, str); }
+
+    bool GetBool(uint32_t index, bool* result) override { return rs_->GetBool(index, result); }
+
+    bool GetChar(uint32_t index, char* result) override { return rs_->GetChar(index, result); }
+
+    bool GetInt16(uint32_t index, int16_t* result) override { return rs_->GetInt16(index, result); }
+
+    bool GetInt32(uint32_t index, int32_t* result) override { return rs_->GetInt32(index, result); }
+
+    bool GetInt64(uint32_t index, int64_t* result) override { return rs_->GetInt64(index, result); }
+
+    bool GetFloat(uint32_t index, float* result) override { return rs_->GetFloat(index, result); }
+
+    bool GetDouble(uint32_t index, double* result) override { return rs_->GetDouble(index, result); }
+
+    bool GetDate(uint32_t index, int32_t* date) override { return rs_->GetDate(index, date); }
+
+    bool GetDate(uint32_t index, int32_t* year, int32_t* month, int32_t* day) override {
+        return rs_->GetDate(index, year, month, day);
+    }
+
+    bool GetTime(uint32_t index, int64_t* mills) override { return rs_->GetTime(index, mills); }
+
+    const ::hybridse::sdk::Schema* GetSchema() override { return rs_->GetSchema(); }
+
+    int32_t Size() override { return rs_->Size(); }
+
+    const bool GetAsString(uint32_t idx, std::string& val) override;
+
+    int32_t GetDataLength() override { return rs_->GetDataLength(); }
+    void CopyTo(hybridse::sdk::ByteArrayPtr buf) override { rs_->CopyTo(buf); }
+
+ private:
+    std::shared_ptr<::hybridse::sdk::ResultSet> rs_;
+};
+
 }  // namespace sdk
 }  // namespace openmldb
 #endif  // SRC_SDK_RESULT_SET_SQL_H_

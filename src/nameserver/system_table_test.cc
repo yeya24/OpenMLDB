@@ -25,7 +25,7 @@
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "base/glog_wapper.h"
+#include "base/glog_wrapper.h"
 #include "brpc/server.h"
 #include "client/ns_client.h"
 #include "common/timer.h"
@@ -35,7 +35,6 @@
 
 DECLARE_string(zk_cluster);
 DECLARE_string(zk_root_path);
-DECLARE_string(db_root_path);
 DECLARE_int32(zk_session_timeout);
 
 namespace openmldb {
@@ -49,8 +48,8 @@ class MockClosure : public ::google::protobuf::Closure {
 };
 class SystemTableTest : public ::testing::Test {
  public:
-    SystemTableTest() {}
-    ~SystemTableTest() {}
+    SystemTableTest() { FLAGS_skip_grant_tables = false; }
+    ~SystemTableTest() { FLAGS_skip_grant_tables = true; }
 };
 
 TEST_F(SystemTableTest, SystemTable) {
@@ -69,7 +68,10 @@ TEST_F(SystemTableTest, SystemTable) {
     std::vector<::openmldb::nameserver::TableInfo> tables;
     std::string msg;
     ASSERT_TRUE(ns_client.ShowTable("", INTERNAL_DB, false, tables, msg));
-    ASSERT_EQ(2, tables.size());
+    ASSERT_EQ(3, tables.size());
+    ASSERT_EQ("JOB_INFO", tables[0].name());
+    ASSERT_EQ("PRE_AGG_META_INFO", tables[1].name());
+    ASSERT_EQ("USER", tables[2].name());
     tables.clear();
     // deny drop system table
     ASSERT_FALSE(ns_client.DropDatabase(INTERNAL_DB, msg));
@@ -104,6 +106,6 @@ int main(int argc, char** argv) {
     srand(time(NULL));
     ::openmldb::base::SetLogLevel(INFO);
     ::google::ParseCommandLineFlags(&argc, &argv, true);
-    FLAGS_db_root_path = "/tmp/" + ::openmldb::test::GenRand();
+    ::openmldb::test::InitRandomDiskFlags("system_table_test");
     return RUN_ALL_TESTS();
 }

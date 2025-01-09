@@ -30,42 +30,12 @@
 #include "storage/ticket.h"
 #include "vm/catalog.h"
 
-using ::openmldb::api::LogEntry;
-using ::openmldb::base::Slice;
-
 namespace openmldb {
 namespace storage {
 
 typedef google::protobuf::RepeatedPtrField<::openmldb::api::Dimension> Dimensions;
-
-class MemTableTraverseIterator : public TraverseIterator {
- public:
-    MemTableTraverseIterator(Segment** segments, uint32_t seg_cnt, ::openmldb::storage::TTLType ttl_type,
-                             uint64_t expire_time, uint64_t expire_cnt, uint32_t ts_index);
-    ~MemTableTraverseIterator() override;
-    inline bool Valid() override;
-    void Next() override;
-    void NextPK() override;
-    void Seek(const std::string& key, uint64_t time) override;
-    openmldb::base::Slice GetValue() const override;
-    std::string GetPK() const override;
-    uint64_t GetKey() const override;
-    void SeekToFirst() override;
-    uint64_t GetCount() const override;
-
- private:
-    Segment** segments_;
-    uint32_t const seg_cnt_;
-    uint32_t seg_idx_;
-    KeyEntries::Iterator* pk_it_;
-    TimeEntries::Iterator* it_;
-    uint32_t record_idx_;
-    uint32_t ts_idx_;
-    // uint64_t expire_value_;
-    TTLSt expire_value_;
-    Ticket ticket_;
-    uint64_t traverse_cnt_;
-};
+using ::openmldb::api::LogEntry;
+using ::openmldb::base::Slice;
 
 class MemTable : public Table {
  public:
@@ -81,14 +51,15 @@ class MemTable : public Table {
 
     bool Put(const std::string& pk, uint64_t time, const char* data, uint32_t size) override;
 
-    bool Put(uint64_t time, const std::string& value, const Dimensions& dimensions) override;
+    absl::Status Put(uint64_t time, const std::string& value, const Dimensions& dimensions,
+                     bool put_if_absent) override;
 
-    bool GetBulkLoadInfo(::openmldb::api::BulkLoadInfoResponse* response);
+    virtual bool GetBulkLoadInfo(::openmldb::api::BulkLoadInfoResponse* response);
 
-    bool BulkLoad(const std::vector<DataBlock*>& data_blocks,
-                  const ::google::protobuf::RepeatedPtrField<::openmldb::api::BulkLoadIndex>& indexes);
+    virtual bool BulkLoad(const std::vector<DataBlock*>& data_blocks,
+                          const ::google::protobuf::RepeatedPtrField<::openmldb::api::BulkLoadIndex>& indexes);
 
-    bool Delete(const std::string& pk, uint32_t idx) override;
+    bool Delete(const ::openmldb::api::LogEntry& entry) override;
 
     // use the first demission
     TableIterator* NewIterator(const std::string& pk, Ticket& ticket) override;
@@ -97,7 +68,7 @@ class MemTable : public Table {
 
     TraverseIterator* NewTraverseIterator(uint32_t index) override;
 
-    ::hybridse::vm::WindowIterator* NewWindowIterator(uint32_t index);
+    ::hybridse::vm::WindowIterator* NewWindowIterator(uint32_t index) override;
 
     // release all memory allocated
     uint64_t Release();
@@ -116,7 +87,7 @@ class MemTable : public Table {
 
     uint64_t GetRecordByteSize() const override { return record_byte_size_.load(std::memory_order_relaxed); }
 
-    uint64_t GetRecordCnt() const override { return record_cnt_.load(std::memory_order_relaxed); }
+    uint64_t GetRecordCnt() override { return GetRecordIdxCnt(); }
 
     inline uint32_t GetSegCnt() const { return seg_cnt_; }
 
@@ -128,27 +99,35 @@ class MemTable : public Table {
 
     inline bool GetExpireStatus() { return enable_gc_.load(std::memory_order_relaxed); }
 
-    inline void RecordCntIncr() { record_cnt_.fetch_add(1, std::memory_order_relaxed); }
-
-    inline void RecordCntIncr(uint32_t cnt) { record_cnt_.fetch_add(cnt, std::memory_order_relaxed); }
-
     inline uint32_t GetKeyEntryHeight() const { return key_entry_max_height_; }
 
-    bool DeleteIndex(const std::string& idx_name) override;
+ protected:
+    bool AddIndexToTable(const std::shared_ptr<IndexDef>& index_def) override;
 
-    bool AddIndex(const ::openmldb::common::ColumnKey& column_key);
+    uint32_t SegIdx(const std::string& pk);
+
+    Segment* GetSegment(uint32_t real_idx, uint32_t seg_idx) {
+        // TODO(hw): protect
+        return segments_[real_idx][seg_idx];
+    }
+    Segment** GetSegments(uint32_t real_idx) { return segments_[real_idx]; }
+
+    bool InitMeta();
+    uint32_t KeyEntryMaxHeight(const std::shared_ptr<InnerIndexSt>& inner_idx);
 
  private:
     bool CheckAbsolute(const TTLSt& ttl, uint64_t ts);
 
     bool CheckLatest(uint32_t index_id, const std::string& key, uint64_t ts);
 
- private:
+    bool Delete(uint32_t idx, const std::string& key, const std::optional<uint64_t>& start_ts,
+                const std::optional<uint64_t>& end_ts);
+
+ protected:
     uint32_t seg_cnt_;
     std::vector<Segment**> segments_;
     std::atomic<bool> enable_gc_;
     uint64_t ttl_offset_;
-    std::atomic<uint64_t> record_cnt_;
     bool segment_released_;
     std::atomic<uint64_t> record_byte_size_;
     uint32_t key_entry_max_height_;

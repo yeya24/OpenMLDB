@@ -18,7 +18,6 @@
 #include <gflags/gflags.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/text_format.h>
-#include <snappy.h>
 #include <unistd.h>
 
 #include <iostream>
@@ -26,7 +25,7 @@
 #include <random>
 
 #include "base/file_util.h"
-#include "base/glog_wapper.h"
+#include "base/glog_wrapper.h"
 #include "base/hash.h"
 #include "base/ip.h"
 #include "base/kv_iterator.h"
@@ -38,6 +37,7 @@
 #include "tablet/tablet_impl.h"
 #endif
 #include "apiserver/api_server_impl.h"
+#include "auth/brpc_authenticator.h"
 #include "boost/algorithm/string.hpp"
 #include "boost/lexical_cast.hpp"
 #include "brpc/server.h"
@@ -63,16 +63,16 @@ DECLARE_string(nameserver);
 DECLARE_int32(port);
 DECLARE_string(zk_cluster);
 DECLARE_string(zk_root_path);
+DECLARE_string(zk_auth_schema);
+DECLARE_string(zk_cert);
 DECLARE_int32(thread_pool_size);
 DECLARE_int32(put_concurrency_limit);
 DECLARE_int32(get_concurrency_limit);
-DEFINE_string(role, "",
-              "Set the openmldb role for start: tablet | nameserver | client | ns_client | sql_client | apiserver");
-DEFINE_string(cmd, "", "Set the command");
+DECLARE_string(role);
+DECLARE_string(cmd);
 DECLARE_bool(interactive);
 
-DECLARE_string(openmldb_log_dir);
-DEFINE_string(log_level, "debug", "Set the log level, eg: debug or info");
+DECLARE_string(log_level);
 DECLARE_uint32(latest_ttl_max);
 DECLARE_uint32(absolute_ttl_max);
 DECLARE_uint32(skiplist_max_height);
@@ -82,6 +82,8 @@ DECLARE_uint32(max_col_display_length);
 DECLARE_bool(version);
 DECLARE_bool(use_name);
 DECLARE_string(data_dir);
+DECLARE_string(user);
+DECLARE_string(password);
 
 const std::string OPENMLDB_VERSION = std::to_string(OPENMLDB_VERSION_MAJOR) + "." +  // NOLINT
                                      std::to_string(OPENMLDB_VERSION_MINOR) + "." +
@@ -90,17 +92,13 @@ const std::string OPENMLDB_VERSION = std::to_string(OPENMLDB_VERSION_MAJOR) + ".
 static std::map<std::string, std::string> real_ep_map;
 
 void SetupLog() {
-    // Config log
+    // Config log for server
     if (FLAGS_log_level == "debug") {
         ::openmldb::base::SetLogLevel(DEBUG);
     } else {
         ::openmldb::base::SetLogLevel(INFO);
     }
-    if (!FLAGS_openmldb_log_dir.empty()) {
-        ::openmldb::base::Mkdir(FLAGS_openmldb_log_dir);
-        std::string file = FLAGS_openmldb_log_dir + "/" + FLAGS_role;
-        openmldb::base::SetLogFile(file);
-    }
+    ::openmldb::base::SetupGlog();
 }
 
 void GetRealEndpoint(std::string* real_endpoint) {
@@ -146,7 +144,15 @@ void StartNameServer() {
         PDLOG(WARNING, "Fail to register name");
         exit(1);
     }
+
     brpc::ServerOptions options;
+    std::unique_ptr<openmldb::authn::BRPCAuthenticator> server_authenticator;
+    server_authenticator = std::make_unique<openmldb::authn::BRPCAuthenticator>(
+        [name_server](const std::string& host, const std::string& username, const std::string& password) {
+            return name_server->IsAuthenticated(host, username, password);
+        });
+    options.auth = server_authenticator.get();
+
     options.num_threads = FLAGS_thread_pool_size;
     brpc::Server server;
     if (server.AddService(name_server, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
@@ -244,6 +250,13 @@ void StartTablet() {
         exit(1);
     }
     brpc::ServerOptions options;
+    std::unique_ptr<openmldb::authn::BRPCAuthenticator> server_authenticator;
+
+    server_authenticator = std::make_unique<openmldb::authn::BRPCAuthenticator>(
+        [tablet](const std::string& host, const std::string& username, const std::string& password) {
+            return tablet->IsAuthenticated(host, username, password);
+        });
+    options.auth = server_authenticator.get();
     options.num_threads = FLAGS_thread_pool_size;
     brpc::Server server;
     if (server.AddService(tablet, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
@@ -271,8 +284,7 @@ void StartTablet() {
 
 int PutData(uint32_t tid, const std::map<uint32_t, std::vector<std::pair<std::string, uint32_t>>>& dimensions,
             uint64_t ts, const std::string& value,
-            const google::protobuf::RepeatedPtrField<::openmldb::nameserver::TablePartition>& table_partition,
-            uint32_t format_version) {
+            const google::protobuf::RepeatedPtrField<::openmldb::nameserver::TablePartition>& table_partition) {
     std::map<std::string, std::shared_ptr<::openmldb::client::TabletClient>> clients;
     for (auto iter = dimensions.begin(); iter != dimensions.end(); iter++) {
         uint32_t pid = iter->first;
@@ -310,7 +322,7 @@ int PutData(uint32_t tid, const std::map<uint32_t, std::vector<std::pair<std::st
             }
         }
 
-        if (!clients[endpoint]->Put(tid, pid, ts, value, iter->second)) {
+        if (!clients[endpoint]->Put(tid, pid, ts, value, iter->second).OK()) {
             printf("put failed. tid %u pid %u endpoint %s ts %lu \n", tid, pid, endpoint.c_str(), ts);
             return -1;
         }
@@ -348,14 +360,8 @@ int PutData(uint32_t tid, const std::map<uint32_t, std::vector<std::pair<std::st
         return ::openmldb::base::Status(-1, "Encode data error");
     }
 
-    if (table_info.compress_type() == ::openmldb::type::CompressType::kSnappy) {
-        std::string compressed;
-        ::snappy::Compress(value.c_str(), value.length(), &compressed);
-        value = compressed;
-    }
     const int tid = table_info.tid();
-    const uint32_t fmt_ver = table_info.format_version();
-    PutData(tid, dimensions, ts, value, table_info.table_partition(), fmt_ver);
+    PutData(tid, dimensions, ts, value, table_info.table_partition());
 
     return ::openmldb::base::Status(0, "ok");
 }
@@ -450,7 +456,7 @@ std::shared_ptr<::openmldb::client::TabletClient> GetTabletClient(const ::openml
 
 void HandleNSClientSetTTL(const std::vector<std::string>& parts, ::openmldb::client::NsClient* client) {
     if (parts.size() < 4) {
-        std::cout << "bad setttl format, eg settl t1 absolute 10" << std::endl;
+        std::cout << "bad setttl format, eg settl t1 absolute 10 [index0]" << std::endl;
         return;
     }
     std::string index_name;
@@ -487,7 +493,9 @@ void HandleNSClientSetTTL(const std::vector<std::string>& parts, ::openmldb::cli
         }
         bool ok = client->UpdateTTL(parts[1], type, abs_ttl, lat_ttl, index_name, err);
         if (ok) {
-            std::cout << "Set ttl ok !" << std::endl;
+            std::cout << "Set ttl ok ! Note that, "
+                         "it will take effect after two garbage collection intervals (i.e. gc_interval)."
+                      << std::endl;
         } else {
             std::cout << "Set ttl failed! " << err << std::endl;
         }
@@ -502,20 +510,49 @@ void HandleNSClientCancelOP(const std::vector<std::string>& parts, ::openmldb::c
         return;
     }
     try {
-        std::string err;
         if (boost::lexical_cast<int64_t>(parts[1]) <= 0) {
             std::cout << "Invalid args. op_id should be large than zero" << std::endl;
             return;
         }
         uint64_t op_id = boost::lexical_cast<uint64_t>(parts[1]);
-        bool ok = client->CancelOP(op_id, err);
-        if (ok) {
-            std::cout << "Cancel op ok!" << std::endl;
+        auto st = client->CancelOP(op_id);
+        if (st.OK()) {
+            std::cout << "Cancel op ok" << std::endl;
         } else {
-            std::cout << "Cancel op failed! " << err << std::endl;
+            std::cout << "Cancel op failed, error msg: " << st.ToString() << std::endl;
         }
     } catch (std::exception const& e) {
         std::cout << "Invalid args. op_id should be uint64_t" << std::endl;
+    }
+}
+
+void HandleNSClientDeleteOP(const std::vector<std::string>& parts, ::openmldb::client::NsClient* client) {
+    if (parts.size() < 2) {
+        std::cout << "bad deleteop format, eg: deleteop 1002, deleteop doing" << std::endl;
+        return;
+    }
+    std::optional<uint64_t> op_id = std::nullopt;
+    openmldb::api::TaskStatus status = openmldb::api::TaskStatus::kDone;
+    uint64_t id = 0;
+    if (absl::SimpleAtoi(parts[1], &id)) {
+        op_id = id;
+    } else {
+        if (absl::EqualsIgnoreCase(parts[1], "done")) {
+            status = openmldb::api::TaskStatus::kDone;
+        } else if (absl::EqualsIgnoreCase(parts[1], "failed")) {
+            status = openmldb::api::TaskStatus::kFailed;
+        } else if (absl::EqualsIgnoreCase(parts[1], "canceled")) {
+            status = openmldb::api::TaskStatus::kCanceled;
+        } else {
+            std::cout << "invalid args" << std::endl;
+            return;
+        }
+    }
+    auto st = client->DeleteOP(op_id, status);
+    if (st.OK()) {
+        std::cout << "Delete op ok" << std::endl;
+    } else {
+        std::cout << "Delete op failed, error msg: " << st.ToString() << std::endl;
     }
 }
 
@@ -704,10 +741,10 @@ void HandleNSAddReplica(const std::vector<std::string>& parts, ::openmldb::clien
         std::cout << "has not valid pid" << std::endl;
         return;
     }
-    std::string msg;
-    bool ok = client->AddReplica(parts[1], pid_set, parts[3], msg);
-    if (!ok) {
-        std::cout << "Fail to addreplica. error msg:" << msg << std::endl;
+
+    auto st = client->AddReplica(parts[1], pid_set, parts[3]);
+    if (!st.OK()) {
+        std::cout << "Fail to addreplica. error msg:" << st.GetMsg() << std::endl;
         return;
     }
     std::cout << "AddReplica ok" << std::endl;
@@ -727,10 +764,9 @@ void HandleNSDelReplica(const std::vector<std::string>& parts, ::openmldb::clien
         std::cout << "has not valid pid" << std::endl;
         return;
     }
-    std::string msg;
-    bool ok = client->DelReplica(parts[1], pid_set, parts[3], msg);
-    if (!ok) {
-        std::cout << "Fail to delreplica. error msg:" << msg << std::endl;
+    auto st = client->DelReplica(parts[1], pid_set, parts[3]);
+    if (!st.OK()) {
+        std::cout << "Fail to delreplica. error msg:" << st.GetMsg() << std::endl;
         return;
     }
     std::cout << "DelReplica ok" << std::endl;
@@ -907,16 +943,17 @@ void HandleNSClientChangeLeader(const std::vector<std::string>& parts, ::openmld
         if (parts.size() > 3) {
             candidate_leader = parts[3];
         }
-        bool ret = client->ChangeLeader(parts[1], pid, candidate_leader, msg);
-        if (!ret) {
-            std::cout << "failed to change leader. error msg: " << msg << std::endl;
+        auto st = client->ChangeLeader(parts[1], pid, candidate_leader);
+        if (!st.OK()) {
+            std::cout << "failed to change leader. error msg: " << st.GetMsg() << std::endl;
             return;
         }
     } catch (const std::exception& e) {
         std::cout << "Invalid args. pid should be uint32_t" << std::endl;
         return;
     }
-    std::cout << "change leader ok" << std::endl;
+    std::cout << "change leader ok. If there are writing operations while changing a leader, it may cause data loss."
+              << std::endl;
 }
 
 void HandleNSClientOfflineEndpoint(const std::vector<std::string>& parts, ::openmldb::client::NsClient* client) {
@@ -967,9 +1004,9 @@ void HandleNSClientMigrate(const std::vector<std::string>& parts, ::openmldb::cl
         std::cout << "has not valid pid" << std::endl;
         return;
     }
-    bool ret = client->Migrate(parts[1], parts[2], pid_set, parts[4], msg);
-    if (!ret) {
-        std::cout << "failed to migrate partition. error msg: " << msg << std::endl;
+    auto st = client->Migrate(parts[1], parts[2], pid_set, parts[4]);
+    if (!st.OK()) {
+        std::cout << "failed to migrate partition. error msg: " << st.GetMsg() << std::endl;
         return;
     }
     std::cout << "partition migrate ok" << std::endl;
@@ -1022,10 +1059,9 @@ void HandleNSClientRecoverTable(const std::vector<std::string>& parts, ::openmld
     }
     try {
         uint32_t pid = boost::lexical_cast<uint32_t>(parts[2]);
-        std::string msg;
-        bool ok = client->RecoverTable(parts[1], pid, parts[3], msg);
-        if (!ok) {
-            std::cout << "Fail to recover table. error msg:" << msg << std::endl;
+        auto st = client->RecoverTable(parts[1], pid, parts[3]);
+        if (!st.OK()) {
+            std::cout << "Fail to recover table. error msg:" << st.GetMsg() << std::endl;
             return;
         }
         std::cout << "recover table ok" << std::endl;
@@ -1083,7 +1119,7 @@ void HandleNSClientShowSchema(const std::vector<std::string>& parts, ::openmldb:
         return;
     }
     if (tables.empty()) {
-        printf("table %s is not exist\n", name.c_str());
+        printf("table %s does not exist\n", name.c_str());
         return;
     }
 
@@ -1110,7 +1146,7 @@ void HandleNSDelete(const std::vector<std::string>& parts, ::openmldb::client::N
             return;
         }
         if (tables.empty()) {
-            printf("delete failed! table %s is not exist\n", parts[1].c_str());
+            printf("delete failed! table %s does not exist\n", parts[1].c_str());
             return;
         }
         uint32_t tid = tables[0].tid();
@@ -1130,7 +1166,7 @@ void HandleNSDelete(const std::vector<std::string>& parts, ::openmldb::client::N
                 }
             }
             if (idx_name.empty()) {
-                printf("idx_name %s is not exist\n", parts[3].c_str());
+                printf("idx_name %s does not exist\n", parts[3].c_str());
                 return;
             }
         }
@@ -1319,14 +1355,14 @@ void HandleNSGet(const std::vector<std::string>& parts, ::openmldb::client::NsCl
     if (parts.size() < 4) {
         std::cout << "get format error. eg: get table_name key ts | get "
                      "table_name key idx_name ts | get table_name=xxx key=xxx "
-                     "index_name=xxx ts=xxx ts_name=xxx "
+                     "index_name=xxx ts=xxx"
                   << std::endl;
         return;
     }
     std::map<std::string, std::string> parameter_map;
     if (!GetParameterMap("table_name", parts, "=", parameter_map)) {
         std::cout << "get format error. eg: get table_name=xxx key=xxx "
-                     "index_name=xxx ts=xxx ts_name=xxx "
+                     "index_name=xxx ts=xxx"
                   << std::endl;
         return;
     }
@@ -1383,7 +1419,7 @@ void HandleNSGet(const std::vector<std::string>& parts, ::openmldb::client::NsCl
         return;
     }
     if (tables.empty()) {
-        printf("get failed! table %s is not exist\n", parts[1].c_str());
+        printf("get failed! table %s does not exist\n", parts[1].c_str());
         return;
     }
     uint32_t tid = tables[0].tid();
@@ -1394,7 +1430,7 @@ void HandleNSGet(const std::vector<std::string>& parts, ::openmldb::client::NsCl
         return;
     }
     ::openmldb::codec::SDKCodec codec(tables[0]);
-    bool no_schema = tables[0].column_desc_size() == 0 && tables[0].column_desc_size() == 0;
+    bool no_schema = tables[0].column_desc_size() == 0;
     if (no_schema) {
         std::string value;
         uint64_t ts = 0;
@@ -1402,11 +1438,6 @@ void HandleNSGet(const std::vector<std::string>& parts, ::openmldb::client::NsCl
             std::string msg;
             bool ok = tb_client->Get(tid, pid, key, timestamp, value, ts, msg);
             if (ok) {
-                if (tables[0].compress_type() == ::openmldb::type::CompressType::kSnappy) {
-                    std::string uncompressed;
-                    ::snappy::Uncompress(value.c_str(), value.length(), &uncompressed);
-                    value = uncompressed;
-                }
                 std::cout << "value :" << value << std::endl;
             } else {
                 std::cout << "Get failed. error msg: " << msg << std::endl;
@@ -1452,11 +1483,6 @@ void HandleNSGet(const std::vector<std::string>& parts, ::openmldb::client::NsCl
                 std::cout << "Fail to get value! error msg: " << msg << std::endl;
                 return;
             }
-        }
-        if (tables[0].compress_type() == ::openmldb::type::CompressType::kSnappy) {
-            std::string uncompressed;
-            ::snappy::Uncompress(value.c_str(), value.length(), &uncompressed);
-            value.swap(uncompressed);
         }
         row.clear();
         codec.DecodeRow(value, &row);
@@ -1558,7 +1584,7 @@ void HandleNSScan(const std::vector<std::string>& parts, ::openmldb::client::NsC
         return;
     }
     if (tables.empty()) {
-        printf("scan failed! table %s is not exist\n", parts[1].c_str());
+        printf("scan failed! table %s does not exist\n", parts[1].c_str());
         return;
     }
     uint32_t tid = tables[0].tid();
@@ -1582,8 +1608,7 @@ void HandleNSScan(const std::vector<std::string>& parts, ::openmldb::client::NsC
                 }
                 it = tb_client->Scan(tid, pid, key, "", st, et, limit, msg);
             } catch (std::exception const& e) {
-                std::cout << "Invalid args. st and et should be uint64_t, limit should"
-                          << "be uint32_t" << std::endl;
+                std::cout << "Invalid args. st and et should be uint64_t, limit should" << "be uint32_t" << std::endl;
                 return;
             }
         }
@@ -1594,7 +1619,7 @@ void HandleNSScan(const std::vector<std::string>& parts, ::openmldb::client::NsC
             std::vector<std::shared_ptr<::openmldb::base::KvIterator>> iter_vec;
             iter_vec.push_back(std::move(it));
             ::openmldb::cmd::SDKIterator sdk_it(iter_vec, limit);
-            ::openmldb::cmd::ShowTableRows(key, &sdk_it, tables[0].compress_type());
+            ::openmldb::cmd::ShowTableRows(key, &sdk_it);
         }
     } else {
         if (parts.size() < 6) {
@@ -1739,7 +1764,7 @@ void HandleNSCount(const std::vector<std::string>& parts, ::openmldb::client::Ns
         return;
     }
     if (tables.empty()) {
-        printf("get failed! table %s is not exist\n", parts[1].c_str());
+        printf("get failed! table %s does not exist\n", parts[1].c_str());
         return;
     }
     uint32_t tid = tables[0].tid();
@@ -1808,7 +1833,7 @@ void HandleNSPreview(const std::vector<std::string>& parts, ::openmldb::client::
         return;
     }
     if (tables.empty()) {
-        printf("preview failed! table %s is not exist\n", parts[1].c_str());
+        printf("preview failed! table %s does not exist\n", parts[1].c_str());
         return;
     }
     uint32_t tid = tables[0].tid();
@@ -1843,7 +1868,7 @@ void HandleNSPreview(const std::vector<std::string>& parts, ::openmldb::client::
             return;
         }
         uint32_t count = 0;
-        auto it = tb_client->Traverse(tid, pid, "", "", 0, limit, false, count);
+        auto it = tb_client->Traverse(tid, pid, "", "", 0, limit, false, 0, count);
         if (!it) {
             std::cout << "Fail to preview table" << std::endl;
             return;
@@ -1854,25 +1879,14 @@ void HandleNSPreview(const std::vector<std::string>& parts, ::openmldb::client::
             row.push_back(std::to_string(index));
 
             if (no_schema) {
-                std::string value = it->GetValue().ToString();
-                if (tables[0].compress_type() == ::openmldb::type::CompressType::kSnappy) {
-                    std::string uncompressed;
-                    ::snappy::Uncompress(value.c_str(), value.length(), &uncompressed);
-                    value = uncompressed;
-                }
                 row.push_back(it->GetPK());
                 row.push_back(std::to_string(it->GetKey()));
-                row.push_back(value);
+                row.push_back(it->GetValue().ToString());
             } else {
                 if (!has_ts_col) {
                     row.push_back(std::to_string(it->GetKey()));
                 }
-                std::string value;
-                if (tables[0].compress_type() == ::openmldb::type::CompressType::kSnappy) {
-                    ::snappy::Uncompress(it->GetValue().data(), it->GetValue().size(), &value);
-                } else {
-                    value.assign(it->GetValue().data(), it->GetValue().size());
-                }
+                std::string value(it->GetValue().data(), it->GetValue().size());
                 codec.DecodeRow(value, &row);
                 ::openmldb::cmd::TransferString(&row);
                 uint64_t row_size = row.size();
@@ -2022,7 +2036,7 @@ void HandleNSPut(const std::vector<std::string>& parts, ::openmldb::client::NsCl
         return;
     }
     if (tables.empty()) {
-        std::cout << "put failed! table " << parts[1] << " is not exist\n";
+        std::cout << "put failed! table " << parts[1] << " does not exist\n";
         return;
     }
     uint64_t ts = 0;
@@ -2260,7 +2274,6 @@ void HandleNSCreateTable(const std::vector<std::string>& parts, ::openmldb::clie
         return;
     }
     ns_table_info.set_db(client->GetDb());
-    ns_table_info.set_format_version(1);
     std::string msg;
     if (!client->CreateTable(ns_table_info, false, msg)) {
         std::cout << "Fail to create table. error msg: " << msg << std::endl;
@@ -2275,6 +2288,7 @@ void HandleNSClientHelp(const std::vector<std::string>& parts, ::openmldb::clien
         printf("addtablefield - add field to the schema table \n");
         printf("addreplica - add replica to leader\n");
         printf("cancelop - cancel the op\n");
+        printf("deleteop - delete the op\n");
         printf("create - create table\n");
         printf("confset - update conf\n");
         printf("confget - get conf\n");
@@ -2327,230 +2341,236 @@ void HandleNSClientHelp(const std::vector<std::string>& parts, ::openmldb::clien
             printf(
                 "usage: create table_name ttl partition_num replica_num "
                 "[colum_name1:type:index colum_name2:type ...]\n");
-            printf("ex: create ./table_meta.txt\n");
-            printf("ex: create table1 144000 8 3\n");
-            printf("ex: create table2 latest:10 8 3\n");
+            printf("example: create ./table_meta.txt\n");
+            printf("example: create table1 144000 8 3\n");
+            printf("example: create table2 latest:10 8 3\n");
             printf(
-                "ex: create table3 latest:10 8 3 card:string:index "
+                "example: create table3 latest:10 8 3 card:string:index "
                 "mcc:string:index value:float\n");
         } else if (parts[1] == "drop") {
             printf("desc: drop table\n");
             printf("usage: drop table_name\n");
-            printf("ex: drop table1\n");
+            printf("example: drop table1\n");
         } else if (parts[1] == "put") {
             printf("desc: insert data into table\n");
             printf("usage: put table_name pk ts value\n");
             printf("usage: put table_name ts key1 key2 ... value1 value2 ...\n");
-            printf("ex: put table1 key1 1528872944000 value1\n");
-            printf("ex: put table2 1528872944000 card0 mcc0 1.3\n");
+            printf("example: put table1 key1 1528872944000 value1\n");
+            printf("example: put table2 1528872944000 card0 mcc0 1.3\n");
         } else if (parts[1] == "scan") {
             printf("desc: get records for a period of time\n");
             printf("usage: scan table_name pk start_time end_time [limit]\n");
             printf(
                 "usage: scan table_name key key_name start_time end_time "
                 "[limit]\n");
-            printf("ex: scan table1 key1 1528872944000 1528872930000\n");
-            printf("ex: scan table1 key1 1528872944000 1528872930000 10\n");
-            printf("ex: scan table1 key1 0 0 10\n");
-            printf("ex: scan table2 card0 card 1528872944000 1528872930000\n");
-            printf("ex: scan table2 card0 card 1528872944000 1528872930000 10\n");
-            printf("ex: scan table2 card0 card  0 0 10\n");
+            printf("example: scan table1 key1 1528872944000 1528872930000\n");
+            printf("example: scan table1 key1 1528872944000 1528872930000 10\n");
+            printf("example: scan table1 key1 0 0 10\n");
+            printf("example: scan table2 card0 card 1528872944000 1528872930000\n");
+            printf("example: scan table2 card0 card 1528872944000 1528872930000 10\n");
+            printf("example: scan table2 card0 card  0 0 10\n");
         } else if (parts[1] == "get") {
             printf("desc: get only one record\n");
             printf("usage: get table_name key ts\n");
             printf("usage: get table_name key idx_name ts\n");
-            printf("ex: get table1 key1 1528872944000\n");
-            printf("ex: get table1 key1 0\n");
-            printf("ex: get table2 card0 card 1528872944000\n");
-            printf("ex: get table2 card0 card 0\n");
+            printf("example: get table1 key1 1528872944000\n");
+            printf("example: get table1 key1 0\n");
+            printf("example: get table2 card0 card 1528872944000\n");
+            printf("example: get table2 card0 card 0\n");
         } else if (parts[1] == "delete") {
             printf("desc: delete pk\n");
             printf("usage: delete table_name key idx_name\n");
-            printf("ex: delete table1 key1\n");
-            printf("ex: delete table2 card0 card\n");
+            printf("example: delete table1 key1\n");
+            printf("example: delete table2 card0 card\n");
         } else if (parts[1] == "count") {
             printf("desc: count the num of data in specified key\n");
             printf("usage: count table_name key [filter_expired_data]\n");
             printf("usage: count table_name key idx_name [filter_expired_data]\n");
-            printf("ex: count table1 key1\n");
-            printf("ex: count table1 key1 true\n");
-            printf("ex: count table2 card0 card\n");
-            printf("ex: count table2 card0 card true\n");
+            printf("example: count table1 key1\n");
+            printf("example: count table1 key1 true\n");
+            printf("example: count table2 card0 card\n");
+            printf("example: count table2 card0 card true\n");
         } else if (parts[1] == "preview") {
             printf("desc: preview data in table\n");
             printf("usage: preview table_name [limit]\n");
-            printf("ex: preview table1\n");
-            printf("ex: preview table1 10\n");
+            printf("example: preview table1\n");
+            printf("example: preview table1 10\n");
         } else if (parts[1] == "showtable") {
             printf("desc: show table info\n");
             printf("usage: showtable [table_name]\n");
-            printf("ex: showtable\n");
-            printf("ex: showtable table1\n");
+            printf("example: showtable\n");
+            printf("example: showtable table1\n");
         } else if (parts[1] == "showtablet") {
             printf("desc: show tablet info\n");
             printf("usage: showtablet\n");
-            printf("ex: showtablet\n");
+            printf("example: showtablet\n");
         } else if (parts[1] == "showsdkendpoint") {
             printf("desc: show sdkendpoint info\n");
             printf("usage: showsdkendpoint\n");
-            printf("ex: showsdkendpoint\n");
+            printf("example: showsdkendpoint\n");
         } else if (parts[1] == "showns") {
             printf("desc: show nameserver info\n");
             printf("usage: showns\n");
-            printf("ex: showns\n");
+            printf("example: showns\n");
         } else if (parts[1] == "showschema") {
             printf("desc: show schema info\n");
             printf("usage: showschema table_name\n");
-            printf("ex: showschema table1\n");
+            printf("example: showschema table1\n");
         } else if (parts[1] == "showopstatus") {
             printf("desc: show op info\n");
             printf("usage: showopstatus [table_name pid]\n");
-            printf("ex: showopstatus\n");
-            printf("ex: showopstatus table1\n");
-            printf("ex: showopstatus table1 0\n");
+            printf("example: showopstatus\n");
+            printf("example: showopstatus table1\n");
+            printf("example: showopstatus table1 0\n");
         } else if (parts[1] == "makesnapshot") {
             printf("desc: make snapshot\n");
             printf("usage: makesnapshot name pid\n");
-            printf("ex: makesnapshot table1 0\n");
+            printf("example: makesnapshot table1 0\n");
         } else if (parts[1] == "addreplica") {
             printf("desc: add replica to leader\n");
             printf("usage: addreplica name pid_group endpoint\n");
-            printf("ex: addreplica table1 0 172.27.128.31:9527\n");
-            printf("ex: addreplica table1 0,3,5 172.27.128.31:9527\n");
-            printf("ex: addreplica table1 1-5 172.27.128.31:9527\n");
+            printf("example: addreplica table1 0 172.27.128.31:9527\n");
+            printf("example: addreplica table1 0,3,5 172.27.128.31:9527\n");
+            printf("example: addreplica table1 1-5 172.27.128.31:9527\n");
         } else if (parts[1] == "delreplica") {
             printf("desc: delete replica from leader\n\n");
             printf("usage: delreplica name pid_group endpoint\n");
-            printf("ex: delreplica table1 0 172.27.128.31:9527\n");
-            printf("ex: delreplica table1 0,3,5 172.27.128.31:9527\n");
-            printf("ex: delreplica table1 1-5 172.27.128.31:9527\n");
+            printf("example: delreplica table1 0 172.27.128.31:9527\n");
+            printf("example: delreplica table1 0,3,5 172.27.128.31:9527\n");
+            printf("example: delreplica table1 1-5 172.27.128.31:9527\n");
         } else if (parts[1] == "confset") {
             printf("desc: update conf\n");
             printf("usage: confset auto_failover true/false\n");
-            printf("ex: confset auto_failover true\n");
+            printf("example: confset auto_failover true\n");
         } else if (parts[1] == "confget") {
             printf("desc: get conf\n");
             printf("usage: confget\n");
             printf("usage: confget conf_name\n");
-            printf("ex: confget\n");
-            printf("ex: confget auto_failover\n");
+            printf("example: confget\n");
+            printf("example: confget auto_failover\n");
         } else if (parts[1] == "changeleader") {
             printf(
                 "desc: select leader again when the endpoint of leader "
                 "offline\n");
             printf("usage: changeleader table_name pid [candidate_leader]\n");
-            printf("ex: changeleader table1 0\n");
-            printf("ex: changeleader table1 0 auto\n");
-            printf("ex: changeleader table1 0 172.27.128.31:9527\n");
+            printf("example: changeleader table1 0\n");
+            printf("example: changeleader table1 0 auto\n");
+            printf("example: changeleader table1 0 172.27.128.31:9527\n");
         } else if (parts[1] == "offlineendpoint") {
             printf(
                 "desc: select leader and delete replica when endpoint "
                 "offline\n");
             printf("usage: offlineendpoint endpoint [concurrency]\n");
-            printf("ex: offlineendpoint 172.27.128.31:9527\n");
-            printf("ex: offlineendpoint 172.27.128.31:9527 2\n");
+            printf("example: offlineendpoint 172.27.128.31:9527\n");
+            printf("example: offlineendpoint 172.27.128.31:9527 2\n");
         } else if (parts[1] == "recovertable") {
             printf("desc: recover only one table partition\n");
             printf("usage: recovertable table_name pid endpoint\n");
-            printf("ex: recovertable table1 0 172.27.128.31:9527\n");
+            printf("example: recovertable table1 0 172.27.128.31:9527\n");
         } else if (parts[1] == "recoverendpoint") {
             printf("desc: recover all tables in endpoint when online\n");
             printf(
                 "usage: recoverendpoint endpoint [need_restore] "
                 "[concurrency]\n");
-            printf("ex: recoverendpoint 172.27.128.31:9527\n");
-            printf("ex: recoverendpoint 172.27.128.31:9527 false\n");
-            printf("ex: recoverendpoint 172.27.128.31:9527 true 2\n");
+            printf("example: recoverendpoint 172.27.128.31:9527\n");
+            printf("example: recoverendpoint 172.27.128.31:9527 false\n");
+            printf("example: recoverendpoint 172.27.128.31:9527 true 2\n");
         } else if (parts[1] == "migrate") {
             printf("desc: migrate partition form one endpoint to another\n");
             printf(
                 "usage: migrate src_endpoint table_name pid_group "
                 "des_endpoint\n");
-            printf("ex: migrate 172.27.2.52:9991 table1 1 172.27.2.52:9992\n");
-            printf("ex: migrate 172.27.2.52:9991 table1 1,3,5 172.27.2.52:9992\n");
-            printf("ex: migrate 172.27.2.52:9991 table1 1-5 172.27.2.52:9992\n");
+            printf("example: migrate 172.27.2.52:9991 table1 1 172.27.2.52:9992\n");
+            printf("example: migrate 172.27.2.52:9991 table1 1,3,5 172.27.2.52:9992\n");
+            printf("example: migrate 172.27.2.52:9991 table1 1-5 172.27.2.52:9992\n");
         } else if (parts[1] == "gettablepartition") {
             printf("desc: get partition info\n");
             printf("usage: gettablepartition table_name pid\n");
-            printf("ex: gettablepartition table1 0\n");
+            printf("example: gettablepartition table1 0\n");
         } else if (parts[1] == "settablepartition") {
             printf("desc: set partition info\n");
             printf("usage: settablepartition table_name partition_file_path\n");
-            printf("ex: settablepartition table1 ./partition_file.txt\n");
+            printf("example: settablepartition table1 ./partition_file.txt\n");
         } else if (parts[1] == "showdb") {
             printf("desc: show all databases\n");
         } else if (parts[1] == "exit" || parts[1] == "quit") {
             printf("desc: exit client\n");
-            printf("ex: quit\n");
-            printf("ex: exit\n");
+            printf("eamplex: quit\n");
+            printf("example: exit\n");
         } else if (parts[1] == "help" || parts[1] == "man") {
             printf("desc: get cmd info\n");
             printf("usage: help [cmd]\n");
             printf("usage: man [cmd]\n");
-            printf("ex:help\n");
-            printf("ex:help create\n");
-            printf("ex:man\n");
-            printf("ex:man create\n");
+            printf("example:help\n");
+            printf("example:help create\n");
+            printf("example:man\n");
+            printf("example:man create\n");
         } else if (parts[1] == "setttl") {
             printf("desc: set table ttl \n");
-            printf("usage: setttl table_name ttl_type ttl [ts_name]\n");
-            printf("ex: setttl t1 absolute 10\n");
-            printf("ex: setttl t2 latest 5\n");
-            printf("ex: setttl t3 latest 5 ts1\n");
+            printf("usage: setttl table_name ttl_type ttl [ts_name], abs ttl unit is minute\n");
+            printf("example: setttl t1 absolute 10\n");
+            printf("example: setttl t2 latest 5\n");
+            printf("example: setttl t3 latest 5 ts1\n");
         } else if (parts[1] == "cancelop") {
             printf("desc: cancel the op\n");
             printf("usage: cancelop op_id\n");
-            printf("ex: cancelop 5\n");
+            printf("example: cancelop 5\n");
+        } else if (parts[1] == "deleteop") {
+            printf("desc: delete the op\n");
+            printf("usage1: delete op_id\n");
+            printf("usage2: delete op_status\n");
+            printf("example: delete 5\n");
+            printf("example: delete doing\n");
         } else if (parts[1] == "updatetablealive") {
             printf("desc: update table alive status\n");
             printf("usage: updatetablealive table_name pid endppoint is_alive\n");
-            printf("ex: updatetablealive t1 * 172.27.2.52:9991 no\n");
-            printf("ex: updatetablealive t1 0 172.27.2.52:9991 no\n");
+            printf("example: updatetablealive t1 * 172.27.2.52:9991 no\n");
+            printf("example: updatetablealive t1 0 172.27.2.52:9991 no\n");
         } else if (parts[1] == "addtablefield") {
             printf("desc: add table field (max adding field count is 63)\n");
             printf("usage: addtablefield table_name col_name col_type\n");
-            printf("ex: addtablefield test card string\n");
-            printf("ex: addtablefield test money float\n");
+            printf("example: addtablefield test card string\n");
+            printf("example: addtablefield test money float\n");
         } else if (parts[1] == "info") {
             printf("desc: show information of the table\n");
             printf("usage: info table_name \n");
-            printf("ex: info test\n");
+            printf("example: info test\n");
         } else if (parts[1] == "addrepcluster") {
             printf("desc: add remote replica cluster\n");
             printf("usage: addrepcluster zk_endpoints zk_path cluster_alias\n");
             printf(
-                "ex: addrepcluster 10.1.1.1:2181,10.1.1.2:2181 /openmldb_cluster "
+                "example: addrepcluster 10.1.1.1:2181,10.1.1.2:2181 /openmldb_cluster "
                 "prod_dc01\n");
         } else if (parts[1] == "showrepcluster") {
             printf("desc: show remote replica cluster\n");
             printf("usage: showrepcluster\n");
-            printf("ex: showrepcluster\n");
+            printf("example: showrepcluster\n");
         } else if (parts[1] == "removerepcluster") {
             printf("desc: remove remote replica cluster\n");
             printf("usage: removerepcluster cluster_alias\n");
-            printf("ex: removerepcluster prod_dc01\n");
+            printf("example: removerepcluster prod_dc01\n");
         } else if (parts[1] == "switchmode") {
             printf("desc: switch cluster mode\n");
             printf("usage: switchmode normal|leader\n");
-            printf("ex: switchmode normal\n");
-            printf("ex: switchmode leader\n");
+            printf("example: switchmode normal\n");
+            printf("example: switchmode leader\n");
         } else if (parts[1] == "synctable") {
             printf("desc: synctable from leader cluster to replica cluster\n");
             printf("usage: synctable table_name cluster_alias [pid]\n");
-            printf("ex: synctable test bj\n");
-            printf("ex: synctable test bj 0\n");
+            printf("example: synctable test bj\n");
+            printf("example: synctable test bj 0\n");
         } else if (parts[1] == "setsdkendpoint") {
             printf("desc: set sdkendpoint for external network sdk\n");
             printf("usage: setsdkendpoint server_name sdkendpoint\n");
-            printf("eg: setsdkendpoint tb1 202.12.18.1:9527\n");
-            printf("eg: setsdkendpoint tb1 null\n");
+            printf("example: setsdkendpoint tb1 202.12.18.1:9527\n");
+            printf("example: setsdkendpoint tb1 null\n");
         } else if (parts[1] == "addindex") {
             printf("desc: add new index to table\n");
             printf("usage: addindex table_name index_name [col_name] [ts_name]\n");
-            printf("ex: addindex test card\n");
-            printf("ex: addindex test combine1 card,mcc\n");
-            printf("ex: addindex test combine2 id,name ts1,ts2\n");
-            printf("ex: addindex test combine3 id:string,name:int32 ts1,ts2\n");
+            printf("example: addindex test card\n");
+            printf("example: addindex test combine1 card,mcc\n");
+            printf("example: addindex test combine2 id,name ts1,ts2\n");
+            printf("example: addindex test combine3 id:string,name:int32 ts1,ts2\n");
         } else if (parts[1] == "deleteindex") {
             printf("desc: delete index of specified index\n");
             printf("usage: deleteindex table_name index_name");
@@ -2558,15 +2578,15 @@ void HandleNSClientHelp(const std::vector<std::string>& parts, ::openmldb::clien
         } else if (parts[1] == "createdb") {
             printf("desc: create database\n");
             printf("usage: createdb database_name\n");
-            printf("eg: createdb db1");
+            printf("example: createdb db1");
         } else if (parts[1] == "use") {
             printf("desc: use database\n");
             printf("usage: use database_name\n");
-            printf("eg: use db1");
+            printf("example: use db1");
         } else if (parts[1] == "dropdb") {
             printf("desc: drop database\n");
             printf("usage: dropdb database_name\n");
-            printf("eg: dropdb db1");
+            printf("example: dropdb db1");
         } else {
             printf("unsupport cmd %s\n", parts[1].c_str());
         }
@@ -2574,10 +2594,10 @@ void HandleNSClientHelp(const std::vector<std::string>& parts, ::openmldb::clien
         printf("help format error!\n");
         printf("usage: help [cmd]\n");
         printf("usage: man [cmd]\n");
-        printf("ex: help\n");
-        printf("ex: help create\n");
-        printf("ex:man\n");
-        printf("ex:man create\n");
+        printf("example: help\n");
+        printf("example: help create\n");
+        printf("example:man\n");
+        printf("example:man create\n");
     }
 }
 
@@ -2703,9 +2723,9 @@ void HandleNSClientUpdateTableAlive(const std::vector<std::string>& parts, ::ope
             return;
         }
     }
-    std::string msg;
-    if (!client->UpdateTableAliveStatus(endpoint, name, pid, is_alive, msg)) {
-        std::cout << "Fail to update table alive. error msg: " << msg << std::endl;
+
+    if (auto st = client->UpdateTableAliveStatus(endpoint, name, pid, is_alive); !st.OK()) {
+        std::cout << "Fail to update table alive. error msg: " << st.GetMsg() << std::endl;
         return;
     }
     std::cout << "update ok" << std::endl;
@@ -2726,7 +2746,6 @@ void HandleNSShowOPStatus(const std::vector<std::string>& parts, ::openmldb::cli
     ::baidu::common::TPrinter tp(row.size(), FLAGS_max_col_display_length);
     tp.AddRow(row);
     ::openmldb::nameserver::ShowOPStatusResponse response;
-    std::string msg;
     std::string name;
     uint32_t pid = ::openmldb::client::INVALID_PID;
     if (parts.size() > 1) {
@@ -2740,9 +2759,9 @@ void HandleNSShowOPStatus(const std::vector<std::string>& parts, ::openmldb::cli
             return;
         }
     }
-    bool ok = client->ShowOPStatus(response, name, pid, msg);
-    if (!ok) {
-        std::cout << "Fail to show tablets. error msg: " << msg << std::endl;
+    auto status = client->ShowOPStatus(name, pid, &response);
+    if (!status.OK()) {
+        std::cout << "Fail to show tablets. error msg: " << status.GetMsg() << std::endl;
         return;
     }
     for (int idx = 0; idx < response.op_status_size(); idx++) {
@@ -3118,19 +3137,20 @@ void HandleClientGetTableStatus(const std::vector<std::string> parts, ::openmldb
     if (parts.size() == 3) {
         ::openmldb::api::TableStatus table_status;
         try {
-            if (client->GetTableStatus(boost::lexical_cast<uint32_t>(parts[1]), boost::lexical_cast<uint32_t>(parts[2]),
-                                       table_status)) {
+            if (auto st = client->GetTableStatus(boost::lexical_cast<uint32_t>(parts[1]),
+                                                 boost::lexical_cast<uint32_t>(parts[2]), table_status);
+                st.OK()) {
                 status_vec.push_back(table_status);
             } else {
-                std::cout << "gettablestatus failed" << std::endl;
+                std::cout << "gettablestatus failed, error msg: " << st.GetMsg() << std::endl;
             }
         } catch (boost::bad_lexical_cast& e) {
             std::cout << "Bad gettablestatus format" << std::endl;
         }
     } else if (parts.size() == 1) {
         ::openmldb::api::GetTableStatusResponse response;
-        if (!client->GetTableStatus(response)) {
-            std::cout << "gettablestatus failed" << std::endl;
+        if (auto st = client->GetTableStatus(response); !st.OK()) {
+            std::cout << "gettablestatus failed, error msg: " << st.GetMsg() << std::endl;
             return;
         }
         for (int idx = 0; idx < response.all_table_status_size(); idx++) {
@@ -3235,12 +3255,12 @@ void HandleClientLoadTable(const std::vector<std::string> parts, ::openmldb::cli
                 return;
             }
         }
-        bool ok = client->LoadTable(parts[1], boost::lexical_cast<uint32_t>(parts[2]),
+        auto st = client->LoadTable(parts[1], boost::lexical_cast<uint32_t>(parts[2]),
                                     boost::lexical_cast<uint32_t>(parts[3]), ttl, is_leader, seg_cnt);
-        if (ok) {
+        if (st.OK()) {
             std::cout << "LoadTable ok" << std::endl;
         } else {
-            std::cout << "Fail to LoadTable" << std::endl;
+            std::cout << "Fail to LoadTable: " << st.ToString() << std::endl;
         }
     } catch (boost::bad_lexical_cast& e) {
         std::cout << "Bad LoadTable format" << std::endl;
@@ -3311,8 +3331,8 @@ void HandleClientPreview(const std::vector<std::string>& parts, ::openmldb::clie
         return;
     }
     ::openmldb::api::TableStatus table_status;
-    if (!client->GetTableStatus(tid, pid, true, table_status)) {
-        std::cout << "Fail to get table status" << std::endl;
+    if (auto st = client->GetTableStatus(tid, pid, true, table_status); !st.OK()) {
+        std::cout << "Fail to get table status, error msg: " << st.GetMsg() << std::endl;
         return;
     }
     /*std::string schema = table_status.schema();
@@ -3402,9 +3422,8 @@ void HandleClientGetFollower(const std::vector<std::string>& parts, ::openmldb::
     }
     std::map<std::string, uint64_t> info_map;
     uint64_t offset = 0;
-    std::string msg;
-    if (!client->GetTableFollower(tid, pid, offset, info_map, msg)) {
-        std::cout << "get failed. msg: " << msg << std::endl;
+    if (auto st = client->GetTableFollower(tid, pid, offset, info_map); !st.OK()) {
+        std::cout << "get failed, error msg: " << st.GetMsg() << std::endl;
         return;
     }
     std::vector<std::string> header;
@@ -3687,7 +3706,8 @@ void StartNsClient() {
     }
     std::shared_ptr<::openmldb::zk::ZkClient> zk_client;
     if (!FLAGS_zk_cluster.empty()) {
-        zk_client = std::make_shared<::openmldb::zk::ZkClient>(FLAGS_zk_cluster, "", 1000, "", FLAGS_zk_root_path);
+        zk_client = std::make_shared<::openmldb::zk::ZkClient>(FLAGS_zk_cluster, "", FLAGS_zk_session_timeout, "",
+                                                               FLAGS_zk_root_path, FLAGS_zk_auth_schema, FLAGS_zk_cert);
         if (!zk_client->Init()) {
             std::cout << "zk client init failed" << std::endl;
             return;
@@ -3836,6 +3856,8 @@ void StartNsClient() {
             HandleNSClientSetTTL(parts, &client);
         } else if (parts[0] == "cancelop") {
             HandleNSClientCancelOP(parts, &client);
+        } else if (parts[0] == "deleteop") {
+            HandleNSClientDeleteOP(parts, &client);
         } else if (parts[0] == "addtablefield") {
             HandleNSAddTableField(parts, &client);
         } else if (parts[0] == "info") {
@@ -3885,7 +3907,7 @@ void StartAPIServer() {
         GetRealEndpoint(&real_endpoint);
     }
 
-    auto api_service = std::make_unique<::openmldb::apiserver::APIServerImpl>();
+    auto api_service = std::make_unique<::openmldb::apiserver::APIServerImpl>(real_endpoint);
     if (!FLAGS_nameserver.empty()) {
         std::vector<std::string> vec;
         boost::split(vec, FLAGS_nameserver, boost::is_any_of(":"));
@@ -3900,16 +3922,25 @@ void StartAPIServer() {
             PDLOG(WARNING, "Invalid nameserver format");
             exit(1);
         }
-        auto sdk = new ::openmldb::sdk::StandAloneSDK(vec[0], port);
+        auto standalone_options = std::make_shared<::openmldb::sdk::StandaloneOptions>();
+        standalone_options->host = vec[0];
+        standalone_options->port = port;
+        standalone_options->user = FLAGS_user;
+        standalone_options->password = FLAGS_password;
+        auto sdk = new ::openmldb::sdk::StandAloneSDK(standalone_options);
         if (!sdk->Init() || !api_service->Init(sdk)) {
             PDLOG(WARNING, "Fail to init");
             exit(1);
         }
     } else {
-        ::openmldb::sdk::ClusterOptions cluster_options;
-        cluster_options.zk_cluster = FLAGS_zk_cluster;
-        cluster_options.zk_path = FLAGS_zk_root_path;
-        cluster_options.zk_session_timeout = FLAGS_zk_session_timeout;
+        auto cluster_options = std::make_shared<::openmldb::sdk::SQLRouterOptions>();
+        cluster_options->zk_cluster = FLAGS_zk_cluster;
+        cluster_options->zk_path = FLAGS_zk_root_path;
+        cluster_options->zk_session_timeout = FLAGS_zk_session_timeout;
+        cluster_options->zk_auth_schema = FLAGS_zk_auth_schema;
+        cluster_options->zk_cert = FLAGS_zk_cert;
+        cluster_options->user = FLAGS_user;
+        cluster_options->password = FLAGS_password;
         if (!api_service->Init(cluster_options)) {
             PDLOG(WARNING, "Fail to init");
             exit(1);
@@ -3935,8 +3966,11 @@ void StartAPIServer() {
 int main(int argc, char* argv[]) {
     ::google::SetVersionString(OPENMLDB_VERSION);
     ::google::ParseCommandLineFlags(&argc, &argv, true);
-
-    if (FLAGS_role == "ns_client") {
+    if (FLAGS_role.empty()) {
+        std::cout << "client start in stand-alone mode" << std::endl;
+        // TODO(hw): standalonesdk refresh every 2s, too many logs in Debug mode
+        ::openmldb::cmd::StandAloneSQLClient();
+    } else if (FLAGS_role == "ns_client") {
         StartNsClient();
     } else if (FLAGS_role == "sql_client") {
         ::openmldb::cmd::ClusterSQLClient();
@@ -3951,9 +3985,7 @@ int main(int argc, char* argv[]) {
         StartAPIServer();
 #endif
     } else {
-        std::cout << "client start in stand-alone mode" << std::endl;
-        // TODO(hw): standalonesdk refresh every 2s, too many logs in Debug mode
-        ::openmldb::cmd::StandAloneSQLClient();
+        std::cout << "Invalid role: " << FLAGS_role << std::endl;
     }
     return 0;
 }

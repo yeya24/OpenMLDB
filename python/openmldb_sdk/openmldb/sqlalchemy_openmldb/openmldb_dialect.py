@@ -20,6 +20,8 @@ from pathlib import Path
 
 # add parent directory
 sys.path.append(Path(__file__).parent.parent.as_posix())
+
+import sqlalchemy
 from ..dbapi import dbapi as module
 from sqlalchemy.engine import default
 from sqlalchemy import pool
@@ -102,9 +104,6 @@ class OpenmldbDialect(default.DefaultDialect):
 
     def __init__(self, **kw):
         default.DefaultDialect.__init__(self, **kw)
-        self._zkPath = None
-        self._zk = None
-        self._db = None
 
     @classmethod
     def dbapi(cls):
@@ -115,13 +114,35 @@ class OpenmldbDialect(default.DefaultDialect):
             raise Exception("schema unsupported in OpenMLDB")
         return table_name in connection.connection.cursor().get_all_tables()
 
-    def create_connect_args(self, url, **kwargs):
-        qargs = {}
-        self._db = url.database
-        self._zk = url.query.get("zk")
-        self._zkPath = url.query.get("zkPath")
+    def get_table_names(self, connection, schema=None, **kw):
+        """Return a list of table names for `schema`."""
+        all_tables = connection.connection.cursor().get_all_tables()
+        system_tables = ["DEPLOY_RESPONSE_TIME", "GLOBAL_VARIABLES", "JOB_INFO", "PRE_AGG_META_INFO"]
+        user_tables = [name for name in all_tables if name not in system_tables]
+        return user_tables
 
-        qargs["db"] = self._db
-        qargs.update(url.query)
+    def get_pk_constraint(self, connection, table_name, schema=None, **kw):
+        return []
 
-        return (), qargs
+    def get_foreign_keys(self, connection, table_name, schema=None, **kw):
+        return []
+
+    def get_indexes(self, connection, table_name, schema=None, **kw):
+        return []
+
+    def get_columns(self, connection, table_name, schema=None, **kw):
+        """
+        columns_info = [
+            {
+                'name': 'name',
+                'type': sqlalchemy.String(),
+                'nullable': False,
+                'default': None,
+                'primary_key': False,
+                'autoincrement': False,
+                'comment': 'Unique identifier for the row'
+            }
+        ]
+        return columns_info
+        """
+        raise NotImplementedError()

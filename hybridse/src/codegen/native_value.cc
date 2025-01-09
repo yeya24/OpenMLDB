@@ -17,7 +17,6 @@
 #include "codegen/native_value.h"
 #include <dlfcn.h>
 #include <execinfo.h>
-#include <signal.h>
 #include "codegen/context.h"
 #include "codegen/ir_base_builder.h"
 
@@ -42,7 +41,7 @@ namespace codegen {
     return is_null;
 }
 
-::llvm::Value* NativeValue::GetIsNull(CodeGenContext* ctx) const {
+::llvm::Value* NativeValue::GetIsNull(CodeGenContextBase* ctx) const {
     return GetIsNull(ctx->GetBuilder());
 }
 
@@ -56,7 +55,7 @@ namespace codegen {
     }
 }
 
-::llvm::Value* NativeValue::GetValue(CodeGenContext* ctx) const {
+::llvm::Value* NativeValue::GetValue(CodeGenContextBase* ctx) const {
     return GetValue(ctx->GetBuilder());
 }
 
@@ -98,7 +97,11 @@ bool NativeValue::IsRegFlag() const {
 }
 
 bool NativeValue::IsNullable() const { return IsConstNull() || HasFlag(); }
-bool NativeValue::IsConstNull() const { return raw_ == nullptr; }
+
+// NativeValue is null if:
+// - raw_ is null
+// - type_ is of void type.
+bool NativeValue::IsConstNull() const { return raw_ == nullptr || (type_ != nullptr && type_->isVoidTy()); }
 
 void NativeValue::SetName(const std::string& name) {
     if (raw_ == nullptr) {

@@ -47,9 +47,6 @@ class WindowComputer(config: WindowAggConfig, jit: HybridSeJitWrapper, keepIndex
   protected var encoder = new SparkRowCodec(config.inputSchemaSlices)
   private var decoder = new SparkRowCodec(config.outputSchemaSlices)
 
-  // order key field
-  private val orderField = config.inputSchema(config.orderIdx)
-
   // append slices cnt = needAppendInput ? inputSchemaSlices.size : 0
   private val appendSlices = if (config.needAppendInput) config.inputSchemaSlices.length else 0
 
@@ -73,7 +70,7 @@ class WindowComputer(config: WindowAggConfig, jit: HybridSeJitWrapper, keepIndex
     config.excludeCurrentTime,
     config.excludeCurrentRow,
     config.windowFrameTypeName,
-    config.startOffset, config.endOffset, config.rowPreceding, config.maxSize)
+    config.startOffset, config.endOffset, config.rowPreceding, config.maxSize, config.orderIdx < 0)
 
   def compute(row: Row, key: Long, keepIndexColumn: Boolean, unionFlagIdx: Int, inputSchemaSize: Int,
               outputSchema: StructType, enableUnsafeRowFormat: Boolean): Row = {
@@ -152,12 +149,17 @@ class WindowComputer(config: WindowAggConfig, jit: HybridSeJitWrapper, keepIndex
     //  CoreAPI.UnsafeWindowProject(fn, key, hybridseRowBytes, hybridseRowBytes.length, true, appendSlices, window)
 
     // Create native method input from Spark InternalRow
-    val hybridseRowBytes = UnsafeRowUtil.internalRowToHybridseByteBuffer(internalRow)
-    val byteBufferSize = UnsafeRowUtil.getHybridseByteBufferSize(internalRow)
+    //val hybridseRowBytes = UnsafeRowUtil.internalRowToHybridseByteBuffer(internalRow)
+    //val byteBufferSize = UnsafeRowUtil.getHybridseByteBufferSize(internalRow)
+    // Call native method to compute which will copy the byte array again
+    //val outputHybridseRow  =
+    //  CoreAPI.UnsafeWindowProjectDirect(fn, key, hybridseRowBytes, byteBufferSize, true, appendSlices, window)
 
-    // Call native method to compute
+    // Pass the UnsafeRow bytes directly and copy bytes in C API
+    val inputRowBytes = inputUnsaferow.getBytes
+    val inputRowSize = inputRowBytes.size
     val outputHybridseRow  =
-      CoreAPI.UnsafeWindowProjectDirect(fn, key, hybridseRowBytes, byteBufferSize, true, appendSlices, window)
+      CoreAPI.UnsafeWindowProjectBytes(fn, key, inputRowBytes, inputRowSize, true, appendSlices, window)
 
     // TODO: Support append slice in JIT function instead of merge in offline
     val outputInternalRowWithAppend =  if (appendSlices > 0 && enableUnsafeRowFormat) {
@@ -181,7 +183,7 @@ class WindowComputer(config: WindowAggConfig, jit: HybridSeJitWrapper, keepIndex
         UnsafeRowUtil.hybridseRowToInternalRow(outputHybridseRow, outputSchema.size - inputRowColNum)
       }
 
-      new OpenmldbJoinedRow(outputInternalRow, inputUnsaferow)
+      new OpenmldbJoinedRow(inputUnsaferow, outputInternalRow)
     } else {
       // Call methods to generate Spark InternalRow
       if (unsaferowoptCopyDirectByteBuffer) {
@@ -245,16 +247,24 @@ class WindowComputer(config: WindowAggConfig, jit: HybridSeJitWrapper, keepIndex
     window = new WindowInterface(
       config.instanceNotInWindow, config.excludeCurrentTime,
       config.excludeCurrentRow, config.windowFrameTypeName,
-      config.startOffset, config.endOffset, config.rowPreceding, config.maxSize)
+      config.startOffset, config.endOffset, config.rowPreceding, config.maxSize, config.orderIdx < 0)
   }
 
   def extractKey(curRow: Row): Long = {
-    SparkRowUtil.getLongFromIndex(config.orderIdx, orderField.dataType, curRow)
+    if (config.orderIdx < 0) {
+      // no ORDER BY: all to 0
+      return 0
+    }
+    SparkRowUtil.getLongFromIndex(config.orderIdx, config.inputSchema(config.orderIdx).dataType, curRow)
   }
 
   def extractUnsafeKey(curRow: UnsafeRow): Long = {
+    if (config.orderIdx < 0) {
+      // no ORDER BY: all to 0
+      return 0
+    }
     // TODO(tobe): support different data types
-    SparkRowUtil.unsafeGetLongFromIndex(config.orderIdx, orderField.dataType, curRow)
+    SparkRowUtil.unsafeGetLongFromIndex(config.orderIdx, config.inputSchema(config.orderIdx).dataType, curRow)
   }
 
   def delete(): Unit = {

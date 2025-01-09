@@ -203,6 +203,16 @@ Status LambdafyProjects::VisitLeafExpr(node::ExprNode* expr,
                 row_arg, "#" + std::to_string(column_id), column_id);
             break;
         }
+        case node::kExprArray: {
+            // empty array: [] or ARRAY<T>[]
+            *out = expr;
+            break;
+        }
+        case node::kExprCall: {
+            // fn with empty args
+            *out = expr;
+            break;
+        }
         default:
             FAIL_STATUS(common::kCodegenError, "Unknown leaf expr type: " + ExprTypeName(expr->GetExprType()))
     }

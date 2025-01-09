@@ -15,27 +15,16 @@
  */
 
 #include "vm/sql_compiler.h"
+
 #include <memory>
-#include <utility>
-#include "boost/algorithm/string.hpp"
+#include <vector>
+
 #include "case/sql_case.h"
 #include "gtest/gtest.h"
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/GVN.h"
-#include "vm/simple_catalog.h"
-#include "testing/test_base.h"
 #include "testing/engine_test_base.h"
+#include "testing/test_base.h"
+#include "vm/simple_catalog.h"
 
 using namespace llvm;       // NOLINT
 using namespace llvm::orc;  // NOLINT
@@ -53,6 +42,9 @@ class SqlCompilerTest : public ::testing::TestWithParam<SqlCase> {};
 INSTANTIATE_TEST_SUITE_P(
     SqlSimpleQueryParse, SqlCompilerTest,
     testing::ValuesIn(sqlcase::InitCases("cases/plan/simple_query.yaml", FILTERS)));
+INSTANTIATE_TEST_SUITE_P(
+    SqlFeatureSignatureQueryParse, SqlCompilerTest,
+    testing::ValuesIn(sqlcase::InitCases("cases/plan/feature_signature_query.yaml", FILTERS)));
 INSTANTIATE_TEST_SUITE_P(
     SqlWindowQueryParse, SqlCompilerTest,
     testing::ValuesIn(sqlcase::InitCases("cases/plan/window_query.yaml", FILTERS)));

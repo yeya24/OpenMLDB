@@ -13,43 +13,67 @@
 # limitations under the License.
 
 if(TESTING_ENABLE)
+    set(THIRD_LIBS benchmark_main benchmark ${GTEST_LIBRARIES} yaml-cpp)
+
     add_library(mini_cluster_bm_common mini_cluster_bm.cc)
     add_dependencies(mini_cluster_bm_common openmldb_proto)
 
-    add_library(base_test sql_sdk_base_test.cc ../test/base_test.cc)
-    add_dependencies(base_test hybridse_core openmldb_proto)
+    add_library(base_test sql_sdk_base_test.cc)
+    add_dependencies(base_test openmldb_test_base hybridse_core openmldb_proto)
 
-    set(THIRD_LIBS benchmark_main benchmark ${GTEST_LIBRARIES} yaml-cpp)
+    set(SDK_TEST_DEPS base_test openmldb_test_base)
 
     add_executable(db_sdk_test db_sdk_test.cc)
-    target_link_libraries(db_sdk_test base_test ${BIN_LIBS} ${THIRD_LIBS})
+    target_link_libraries(db_sdk_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
+
+    add_executable(sdk_util_test sdk_util_test.cc)
+    target_link_libraries(sdk_util_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
+
+    add_executable(result_set_sql_test result_set_sql_test.cc)
+    target_link_libraries(result_set_sql_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
 
     add_executable(sql_router_test sql_router_test.cc)
-    target_link_libraries(sql_router_test base_test ${BIN_LIBS} benchmark_main benchmark ${GTEST_LIBRARIES})
+    target_link_libraries(sql_router_test ${SDK_TEST_DEPS} ${BIN_LIBS} benchmark_main benchmark ${GTEST_LIBRARIES})
 
     add_executable(sql_standalone_sdk_test sql_standalone_sdk_test.cc)
-    target_link_libraries(sql_standalone_sdk_test base_test ${BIN_LIBS} ${GTEST_LIBRARIES})
+    target_link_libraries(sql_standalone_sdk_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${GTEST_LIBRARIES})
+
+    add_executable(node_adapter_test node_adapter_test.cc)
+    target_link_libraries(node_adapter_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${GTEST_LIBRARIES})
 
     add_executable(sql_sdk_test sql_sdk_test.cc)
-    target_link_libraries(sql_sdk_test base_test ${BIN_LIBS} ${GTEST_LIBRARIES} )
+    target_link_libraries(sql_sdk_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${GTEST_LIBRARIES} )
+
+    add_executable(sql_sdk_run sql_sdk_run.cc)
+    target_link_libraries(sql_sdk_run ${SDK_TEST_DEPS} ${BIN_LIBS})
+    set_target_properties(
+        sql_sdk_run
+        PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
     add_executable(sql_cluster_test sql_cluster_test.cc)
-    target_link_libraries(sql_cluster_test base_test ${BIN_LIBS} ${GTEST_LIBRARIES})
+    target_link_libraries(sql_cluster_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${GTEST_LIBRARIES})
 
     add_executable(sql_request_row_test sql_request_row_test.cc)
-    target_link_libraries(sql_request_row_test base_test ${BIN_LIBS} ${ZETASQL_LIBS} ${THIRD_LIBS})
+    target_link_libraries(sql_request_row_test ${SDK_TEST_DEPS} ${BIN_LIBS} ${ZETASQL_LIBS} ${THIRD_LIBS})
 
     add_executable(mini_cluster_batch_bm mini_cluster_batch_bm.cc)
-    target_link_libraries(mini_cluster_batch_bm mini_cluster_bm_common base_test ${BIN_LIBS} ${THIRD_LIBS})
+    target_link_libraries(mini_cluster_batch_bm mini_cluster_bm_common ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
 
     add_executable(mini_cluster_request_batch_bm mini_cluster_request_batch_bm.cc)
-    target_link_libraries(mini_cluster_request_batch_bm mini_cluster_bm_common base_test ${BIN_LIBS} ${THIRD_LIBS})
+    target_link_libraries(mini_cluster_request_batch_bm mini_cluster_bm_common ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
 
     add_executable(mini_cluster_request_bm mini_cluster_request_bm.cc)
-    target_link_libraries(mini_cluster_request_bm mini_cluster_bm_common base_test ${BIN_LIBS} ${THIRD_LIBS})
+    target_link_libraries(mini_cluster_request_bm mini_cluster_bm_common ${SDK_TEST_DEPS} ${BIN_LIBS} ${THIRD_LIBS})
+
+    add_executable(split_test split_test.cc)
+    target_link_libraries(split_test ${BIN_LIBS})
+
+    add_executable(options_map_parser_test options_map_parser_test.cc)
+    target_link_libraries(options_map_parser_test ${BIN_LIBS})
 endif()
 
-set(SDK_LIBS openmldb_sdk openmldb_catalog client zk_client schema openmldb_flags openmldb_codec openmldb_proto base hybridse_sdk zookeeper_mt)
+set(SDK_LIBS openmldb_sdk openmldb_catalog client zk_client schema openmldb_flags openmldb_codec openmldb_proto base auth hybridse_sdk zookeeper_mt)
 
 if(SQL_PYSDK_ENABLE)
     find_package(Python3 COMPONENTS Interpreter Development)
@@ -106,7 +130,18 @@ if(SQL_PYSDK_ENABLE)
                 COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:sql_router_sdk> ${PROJECT_SOURCE_DIR}/python/openmldb_sdk/openmldb/native/
                 COMMAND echo "Do not strip library for MacOS, refer to https://github.com/4paradigm/OpenMLDB/issues/905")
     else()
-        set(PYTHON_PLATFORM manylinux1_x86_64)
+        # ref https://peps.python.org/pep-0600/ 
+        # centos7 is glibc 2.17, so 'manylinux2014' should preferred, 
+        # 'manylinux2014' is just legacy alias 'manylinux_2_17', we keep this legacy name 
+        # since there still installation issue on python 3.8 for new the name.
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "(amd64)|(x86_64)")
+            set(PYTHON_PLATFORM manylinux1_x86_64)
+        elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "(arm64)|(ARM64)|(aarch64)|(AARCH64)")
+            set(PYTHON_PLATFORM manylinux2014_aarch64)
+        else()
+            message(FATAL_ERROR "unsupported architecture ${CMAKE_SYSTEM_PROCESSOR}")
+        endif()
+
         add_custom_target(strip_python_so ALL DEPENDS sql_router_sdk
             COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:sql_router_sdk> ${PROJECT_SOURCE_DIR}/python/openmldb_sdk/openmldb/native/
             COMMAND strip ${PROJECT_SOURCE_DIR}/python/openmldb_sdk/openmldb/native/_sql_router_sdk.so)
@@ -168,7 +203,7 @@ if(SQL_JAVASDK_ENABLE)
     add_dependencies(cp_native_so cp_hybridse_native_so)
 
     add_custom_target(sql_javasdk_package ALL
-        COMMAND ./mvnw clean package -DskipTests=true -Dscalatest.skip=true -Dwagon.skip=true -Dmaven.test.skip=true ${MAVEN_FLAGS}
+        COMMAND ./mvnw package -DskipTests=true -Dscalatest.skip=true -Dwagon.skip=true -Dmaven.test.skip=true ${MAVEN_FLAGS}
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/java)
     add_dependencies(sql_javasdk_package cp_native_so)
 
@@ -185,4 +220,216 @@ if(SQL_JAVASDK_ENABLE)
     install(FILES ${TASKMANAGER_LIB}
             DESTINATION taskmanager/lib/
             PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
+
+    # Install SyncTool binary and libraries
+    FILE(GLOB SYNCTOOL_BIN "${PROJECT_SOURCE_DIR}/java/openmldb-synctool/target/openmldb-synctool-binary/bin/*")
+    FILE(GLOB SYNCTOOL_CONF "${PROJECT_SOURCE_DIR}/java/openmldb-synctool/target/openmldb-synctool-binary/conf/log4j*")
+    FILE(GLOB SYNCTOOL_LIB "${PROJECT_SOURCE_DIR}/java/openmldb-synctool/target/openmldb-synctool-binary/lib/*")
+    install(FILES ${SYNCTOOL_BIN}
+            DESTINATION synctool/bin/
+            PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
+    install(FILES ${SYNCTOOL_CONF}
+            DESTINATION synctool/conf/
+            PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
+    install(FILES ${SYNCTOOL_LIB}
+            DESTINATION synctool/lib/
+            PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
+endif()
+
+message(STATUS "build cxx sdk")
+# see cicd workflow, we can't build c++ sdk on macos
+if (APPLE)
+    message(STATUS "skip c++ sdk build on macos")
+    return()
+endif()
+if (BUILD_SHARED_LIBS)
+    message(STATUS "skip c++ sdk when BUILD_SHARED_LIBS ON")
+    return()
+endif()
+
+
+add_library(openmldb_api STATIC openmldb_api.cc)
+target_include_directories (
+    openmldb_api
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/sdk
+    ${PROJECT_SOURCE_DIR}/hybridse/src
+    ${PROJECT_SOURCE_DIR}/hybridse/include
+    ${PROJECT_SOURCE_DIR}/.deps/usr/include
+)
+# openmldb_sdk is enough for link, but we need to add all libs to one, add lib hint here
+target_link_libraries(openmldb_api openmldb_sdk 
+    openmldb_codec
+    openmldb_catalog
+    schema
+    client
+    zk_client
+    base
+    auth
+    openmldb_flags
+    hybridse_sdk
+    hybridse_core
+    hybridse_flags
+)
+
+if(TESTING_ENABLE)
+    # load cxx sdk library built below is difficult, cuz we need more libs e.g. mini cluster/stdc++fs to build test
+    # so we just use lower libs to build test
+    # P.S. openmldb_sdk contains a lot, but it's not a good idea to use it to include mini cluster ..., we should reduce ibopenmldbsdk.a
+    add_executable(openmldb_api_test openmldb_api_test.cc)
+    target_link_libraries(openmldb_api_test ${EXPORTER_LIBS} ${GTEST_LIBRARIES})
+endif()
+
+if(APPLE)
+    message(STATUS "skip c++ sdk build")
+    return()
+endif()
+
+# To get the final SDK, we need add built-in libraries and third party libraries 
+# Below, we will find and integrate these required libraries
+
+# dfs target here, if needs path, get after find all targets
+macro(getAllLinkedLibraries iTarget iReturnValue)
+   if(NOT TARGET ${iTarget})
+        # message(STATUS "${iTarget} is not a target")
+        # ignored
+    else()
+        if(NOT ${iTarget} IN_LIST ${iReturnValue}) # avoid too much duplicate
+            list(APPEND ${iReturnValue} ${iTarget})
+        endif()
+
+        get_target_property(linkedLibrairies ${iTarget} INTERFACE_LINK_LIBRARIES)
+        if(NOT "${linkedLibrairies}" STREQUAL "linkedLibrairies-NOTFOUND")
+            FOREACH(linkedLibrary ${linkedLibrairies})
+                getAllLinkedLibraries(${linkedLibrary} ${iReturnValue})
+            ENDFOREACH()
+        endif()
+    endif()
+endmacro()
+
+# lib is target or lib name
+function(get_lib_path X RET)
+    if (NOT TARGET ${X})
+        if(EXISTS ${X})
+            set(RET_V ${X})
+        else()
+            find_library(RET_V ${X})
+        endif()
+    else()
+        # if target has no location, handle it before call this function
+        get_target_property(type ${X} TYPE)
+        if (NOT ${type} STREQUAL "INTERFACE_LIBRARY")
+            get_target_property(RET_V ${X} LOCATION)
+        endif()
+        # message(STATUS "get ${X} path: ${RET_V}")
+    endif()
+    if("${RET_V}" STREQUAL "RET_V-NOTFOUND")
+        # message(STATUS "library ${X} path not found, set empty")
+        set(RET_V "")
+    endif()
+    set(${RET} ${RET_V} PARENT_SCOPE)
+endfunction(get_lib_path)
+
+# get linked libraries built in OpenMLDB
+get_target_property(CXXSDK_TGTS openmldb_api LINK_LIBRARIES)
+list(PREPEND CXXSDK_TGTS openmldb_api)
+list(APPEND CXXSDK_TGTS farmhash) # not a standalone lib, build-in, so use target file
+list(REMOVE_ITEM CXXSDK_TGTS gcov)
+set(CXXSDK_LIBS )
+foreach(X IN LISTS CXXSDK_TGTS)
+    # build-in libraries are targets without location, add lib path(TARGET_FILE in file can get location)
+    list(APPEND CXXSDK_LIBS $<TARGET_FILE:${X}>)
+endforeach()
+
+# CXXSDK_THIRDPARTY_LIBS save all required libraries path
+set(CXXSDK_THIRDPARTY_LIBS )
+
+# 1. zetasql & it's dependencies use ZETASQL_LIBS(include ABSL_LIBS, ICU_LIBRARIES)
+foreach(X IN LISTS ZETASQL_LIBS)
+    get_lib_path(${X} Y)
+    # message(STATUS "get ${X} path: ${Y}")
+    # to simplify, we handle absl implicit link below(some absl lib can't get location by get_target_property), so no recursive get here
+    if(NOT "${Y}" STREQUAL "")
+        list(APPEND CXXSDK_THIRDPARTY_LIBS ${Y})      
+    endif()
+endforeach()
+
+# 2. absl llvm libs(some libs needs to be linked explicitly)
+set(ABSL_LLVM_LIBS ${ABSL_LIBS} ${LLVM_LIBS})
+# set(ABSL_LLVM_LIBS ${LLVM_LIBS})
+# handle absl libs, need to recursively look up, target may need more deps
+foreach(X IN LISTS ABSL_LLVM_LIBS)
+    set(_tgts "")
+    getAllLinkedLibraries(${X} _tgts)
+    list(APPEND ABSL_LLVM_TGTS ${_tgts})
+    # message(STATUS "get ${X} linked libs: ${_tgts}")
+endforeach()
+list(REMOVE_DUPLICATES ABSL_LLVM_TGTS)
+
+# get absl llvm libs path
+foreach(X IN LISTS ABSL_LLVM_TGTS)
+    get_lib_path(${X} Y)
+    # message(STATUS "get ${X} path: ${Y}")
+    list(APPEND CXXSDK_THIRDPARTY_LIBS ${Y})
+endforeach()
+
+# 3. extras
+# hybrid_core needs yaml_libs
+set(EXTRA_LIBS ${BRPC_LIBS} ${YAML_CPP_LIBRARIES} ${zookeeper_mt_LIB} ${Boost_LIBRARIES})
+foreach(X IN LISTS EXTRA_LIBS)
+    get_lib_path(${X} Y)
+    # message(STATUS "get ${X} path: ${Y}")
+    list(APPEND CXXSDK_THIRDPARTY_LIBS ${Y})
+endforeach()
+# brpc includes some so, but we don't need them, so remove them
+list(FILTER CXXSDK_THIRDPARTY_LIBS EXCLUDE REGEX ".*\.so$")
+# for apple
+list(FILTER CXXSDK_THIRDPARTY_LIBS EXCLUDE REGEX ".*\.dylib$")
+list(FILTER CXXSDK_THIRDPARTY_LIBS EXCLUDE REGEX ".*\.tbd$")
+
+set(CXXSDK_NAME libopenmldbsdk.a)
+list(APPEND TOTAL_LIBS ${CXXSDK_LIBS} ${CXXSDK_THIRDPARTY_LIBS})
+# message(STATUS "cxx sdk link libs: ${TOTAL_LIBS}")
+
+# gen mri file
+list(JOIN TOTAL_LIBS "\nADDLIB " ADD_LIBS_PART)
+string(CONCAT ADD_LIBS "ADDLIB " ${ADD_LIBS_PART})
+file(GENERATE OUTPUT cxxsdk.mri CONTENT "CREATE ${CXXSDK_NAME}\n${ADD_LIBS}\nSAVE\nEND")
+add_custom_target(gen_mri DEPENDS cxxsdk.mri openmldb_api)
+
+# ~2G, too big lib
+add_custom_target(pack_cxxsdk ALL
+COMMAND rm -f ${CXXSDK_NAME}
+COMMAND ar -TM < cxxsdk.mri
+DEPENDS gen_mri
+)
+
+if(INSTALL_CXXSDK)
+    FILE(GLOB USER_HEADER 
+        "${PROJECT_SOURCE_DIR}/src/sdk/openmldb_api.h"
+    )
+    FILE(GLOB USER_HEADER_SDK
+        "${PROJECT_SOURCE_DIR}/hybridse/include/sdk/result_set.h"
+        "${PROJECT_SOURCE_DIR}/hybridse/include/sdk/base_schema.h"
+    )
+    FILE(GLOB USER_LIB
+        "${CMAKE_CURRENT_BINARY_DIR}/${CXXSDK_NAME}"
+    )
+
+    install(
+        FILES ${USER_HEADER}
+        DESTINATION include/
+        PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+    )
+    install(
+        FILES ${USER_HEADER_SDK}
+        DESTINATION include/sdk/
+        PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+    )
+    install(
+        FILES ${USER_LIB}
+        DESTINATION lib/
+        PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+    )
 endif()

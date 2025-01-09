@@ -61,7 +61,9 @@ message DeleteJobResponse {
     optional string msg = 2;
 };
 
-message ShowBatchVersionRequest {};
+message ShowBatchVersionRequest {
+    optional bool sync_job = 1 [default = false];
+};
 
 message RunBatchSqlRequest {
     required string sql = 1;
@@ -97,6 +99,13 @@ message ImportOfflineDataRequest {
 };
 
 message ExportOfflineDataRequest {
+    required string sql = 1;
+    map<string, string> conf = 2;
+    optional string default_db = 3 [default = ""];
+    optional bool sync_job = 4 [default = false];
+}
+
+message InsertOfflineDataRequest {
     required string sql = 1;
     map<string, string> conf = 2;
     optional string default_db = 3 [default = ""];
@@ -148,6 +157,16 @@ message GetVersionResponse {
 
 message EmptyMessage {};
 
+message SaveJobResultRequest {
+    required int32 result_id = 1;
+    required string json_data = 2;
+}
+
+message SaveJobResultResponse {
+    required int32 code = 1;
+    optional string msg = 2; 
+}
+
 service TaskManagerServer {
     // Job management
     rpc ShowJobs(ShowJobsRequest) returns (ShowJobsResponse);
@@ -162,6 +181,7 @@ service TaskManagerServer {
     rpc ImportOnlineData(ImportOnlineDataRequest) returns (ShowJobResponse);
     rpc ImportOfflineData(ImportOfflineDataRequest) returns (ShowJobResponse);
     rpc ExportOfflineData(ExportOfflineDataRequest) returns (ShowJobResponse);
+    rpc InsertOfflineData(InsertOfflineDataRequest) returns (ShowJobResponse);
     rpc DropOfflineTable(DropOfflineTableRequest) returns (DropOfflineTableResponse);
     rpc GetJobLog(GetJobLogRequest) returns (GetJobLogResponse);
     rpc CreateFunction(CreateFunctionRequest) returns (CreateFunctionResponse);
@@ -169,4 +189,5 @@ service TaskManagerServer {
 
     // Other APIs
     rpc GetVersion(EmptyMessage) returns (GetVersionResponse);
+    rpc SaveJobResult(SaveJobResultRequest) returns (SaveJobResultResponse);
 };

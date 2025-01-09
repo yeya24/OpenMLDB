@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "boost/algorithm/string.hpp"
@@ -44,14 +45,17 @@ class LlvmUdfGenBase;
 namespace hybridse {
 namespace node {
 
-class ConstNode;
+class ExprNode;
+class WithClauseEntry;
 
-typedef std::unordered_map<std::string, const ConstNode*> OptionsMap;
+typedef std::unordered_map<std::string, const ExprNode*> OptionsMap;
 
 // Global methods
 std::string NameOfSqlNodeType(const SqlNodeType &type);
 
 absl::string_view CmdTypeName(const CmdType type);
+
+std::string SetOperatorName(SetOperationType type, bool dis);
 
 inline const std::string ExplainTypeName(const ExplainType &explain_type) {
     switch (explain_type) {
@@ -63,6 +67,14 @@ inline const std::string ExplainTypeName(const ExplainType &explain_type) {
             return "Unknow";
         }
     }
+}
+
+inline const std::string ShowStmtTypeName(ShowStmtType type) {
+    switch (type) {
+        case ShowStmtType::kJobs:
+            return "Jobs";
+    }
+    return "Unknow";
 }
 
 inline const std::string JoinTypeName(const JoinType &type) {
@@ -126,6 +138,8 @@ inline const std::string ExprOpTypeName(const FnOperator &op) {
             return "LIKE";
         case kFnOpILike:
             return "ILIKE";
+        case kFnOpRLike:
+            return "RLIKE";
         case kFnOpIn:
             return "IN";
         case kFnOpBracket:
@@ -165,8 +179,8 @@ inline const std::string QueryTypeName(const QueryType &type) {
     switch (type) {
         case kQuerySelect:
             return "kQuerySelect";
-        case kQueryUnion:
-            return "kQueryUnion";
+        case kQuerySetOperation:
+            return "kQuerySetOperation";
         case kQuerySub:
             return "kQuerySub";
         default: {
@@ -174,61 +188,8 @@ inline const std::string QueryTypeName(const QueryType &type) {
         }
     }
 }
-inline const std::string ExprTypeName(const ExprType &type) {
-    switch (type) {
-        case kExprPrimary:
-            return "primary";
-        case kExprParameter:
-            return "parameter";
-        case kExprId:
-            return "id";
-        case kExprBinary:
-            return "binary";
-        case kExprUnary:
-            return "unary";
-        case kExprCall:
-            return "function";
-        case kExprCase:
-            return "case";
-        case kExprWhen:
-            return "when";
-        case kExprBetween:
-            return "between";
-        case kExprColumnRef:
-            return "column ref";
-        case kExprColumnId:
-            return "column id";
-        case kExprCast:
-            return "cast";
-        case kExprAll:
-            return "all";
-        case kExprStruct:
-            return "struct";
-        case kExprQuery:
-            return "query";
-        case kExprOrder:
-            return "order";
-        case kExprGetField:
-            return "get field";
-        case kExprCond:
-            return "cond";
-        case kExprUnknow:
-            return "unknow";
-        case kExprIn:
-            return "in";
-        case kExprList:
-            return "expr_list";
-        case kExprForIn:
-            return "for_in";
-        case kExprRange:
-            return "range";
-        case kExprOrderExpression:
-            return "order";
-        case kExprEscaped:
-            return "escape";
-    }
-    return "unknown expr type";
-}
+
+std::string ExprTypeName(ExprType type);
 
 inline const std::string FrameTypeName(const FrameType &type) {
     switch (type) {
@@ -265,59 +226,8 @@ inline const std::string BoundTypeName(const BoundType &type) {
     }
     return "";
 }
-inline const std::string DataTypeName(const DataType &type) {
-    switch (type) {
-        case hybridse::node::kBool:
-            return "bool";
-        case hybridse::node::kInt16:
-            return "int16";
-        case hybridse::node::kInt32:
-            return "int32";
-        case hybridse::node::kInt64:
-            return "int64";
-        case hybridse::node::kFloat:
-            return "float";
-        case hybridse::node::kDouble:
-            return "double";
-        case hybridse::node::kVarchar:
-            return "string";
-        case hybridse::node::kTimestamp:
-            return "timestamp";
-        case hybridse::node::kDate:
-            return "date";
-        case hybridse::node::kList:
-            return "list";
-        case hybridse::node::kMap:
-            return "map";
-        case hybridse::node::kIterator:
-            return "iterator";
-        case hybridse::node::kRow:
-            return "row";
-        case hybridse::node::kSecond:
-            return "second";
-        case hybridse::node::kMinute:
-            return "minute";
-        case hybridse::node::kHour:
-            return "hour";
-        case hybridse::node::kNull:
-            return "null";
-        case hybridse::node::kVoid:
-            return "void";
-        case hybridse::node::kPlaceholder:
-            return "placeholder";
-        case hybridse::node::kOpaque:
-            return "opaque";
-        case hybridse::node::kTuple:
-            return "tuple";
-        case hybridse::node::kDay:
-            return "day";
-        case hybridse::node::kInt8Ptr:
-            return "int8ptr";
-        default:
-            return "unknown";
-    }
-    return "";
-}
+
+std::string DataTypeName(DataType type);
 
 inline const std::string TypeName(type::Type type) {
     switch (type) {
@@ -402,15 +312,24 @@ inline const std::string StorageModeName(StorageMode mode) {
 }
 
 inline const StorageMode NameToStorageMode(const std::string& name) {
-    if (boost::iequals(name, "memory")) {
+    if (absl::EqualsIgnoreCase(name, "memory")) {
         return kMemory;
-    } else if (boost::iequals(name, "hdd")) {
+    } else if (absl::EqualsIgnoreCase(name, "hdd")) {
         return kHDD;
-    } else if (boost::iequals(name, "ssd")) {
+    } else if (absl::EqualsIgnoreCase(name, "ssd")) {
         return kSSD;
     } else {
         return kUnknown;
     }
+}
+
+inline absl::StatusOr<CompressType> NameToCompressType(const std::string& name) {
+    if (absl::EqualsIgnoreCase(name, "snappy")) {
+        return CompressType::kSnappy;
+    } else if (absl::EqualsIgnoreCase(name, "nocompress")) {
+        return CompressType::kNoCompress;
+    }
+    return absl::Status(absl::StatusCode::kInvalidArgument, absl::StrCat("invalid compress type: ", name));
 }
 
 inline const std::string RoleTypeName(RoleType type) {
@@ -439,6 +358,22 @@ class SqlNode : public NodeBase<SqlNode> {
 
     bool Equals(const SqlNode *node) const override;
 
+    // Return this node cast as a NodeType.
+    // Use only when this node is known to be that type, otherwise, behavior is undefined.
+    template <typename NodeType>
+    const NodeType *GetAsOrNull() const {
+        static_assert(std::is_base_of<SqlNode, NodeType>::value,
+                      "NodeType must be a member of the SqlNode class hierarchy");
+        return dynamic_cast<const NodeType *>(this);
+    }
+
+    template <typename NodeType>
+    NodeType *GetAsOrNull() {
+        static_assert(std::is_base_of<SqlNode, NodeType>::value,
+                      "NodeType must be a member of the SqlNode class hierarchy");
+        return dynamic_cast<NodeType *>(this);
+    }
+
     SqlNodeType type_;
 
  private:
@@ -448,6 +383,71 @@ class SqlNode : public NodeBase<SqlNode> {
 
 typedef std::vector<SqlNode *> NodePointVector;
 
+// Alter action for SQL
+// supported as:
+// - ADD PATH
+// - DROP PATH
+// - SET OPTIONS
+// all else is unsupported
+class AlterActionBase : public base::FeBaseObject {
+ public:
+    enum class ActionKind {
+        ADD_PATH = 0,
+        DROP_PATH,
+        SET_OPTIONS
+    };
+
+    explicit AlterActionBase(ActionKind k) : kind_(k) {}
+    ~AlterActionBase() override {}
+
+    ActionKind kind() const { return kind_; }
+
+    virtual std::string DebugString() const = 0;
+
+ protected:
+    ActionKind kind_;
+};
+
+class AddPathAction : public AlterActionBase {
+ public:
+    explicit AddPathAction(absl::string_view t) : AlterActionBase(ActionKind::ADD_PATH), target_(t) {}
+    std::string DebugString() const override;
+
+    std::string target_;
+};
+
+class DropPathAction : public AlterActionBase {
+ public:
+    explicit DropPathAction(absl::string_view t) : AlterActionBase(ActionKind::DROP_PATH), target_(t) {}
+    std::string DebugString() const override;
+
+    std::string target_;
+};
+
+class SetOptionsAction : public AlterActionBase {
+ public:
+    explicit SetOptionsAction(std::shared_ptr<OptionsMap> options)
+        : AlterActionBase(ActionKind::SET_OPTIONS), options_(options) {}
+    std::string DebugString() const override;
+    const std::shared_ptr<OptionsMap> Options() const { return options_; }
+
+ private:
+    const std::shared_ptr<OptionsMap> options_;
+};
+
+class AlterTableStmt: public SqlNode {
+ public:
+    AlterTableStmt(absl::string_view db, absl::string_view table, const std::vector<const AlterActionBase *> &actions)
+        : SqlNode(kAlterTableStmt, 0, 0), db_(db), table_(table), actions_(actions) {}
+    ~AlterTableStmt() override {}
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+
+    std::string db_;
+    std::string table_;
+    std::vector<const AlterActionBase *> actions_;
+};
+
 class SqlNodeList : public SqlNode {
  public:
     SqlNodeList() : SqlNode(kNodeList, 0, 0) {}
@@ -455,12 +455,12 @@ class SqlNodeList : public SqlNode {
     void PushBack(SqlNode *node_ptr) { list_.push_back(node_ptr); }
     const bool IsEmpty() const { return list_.empty(); }
     const int GetSize() const { return list_.size(); }
-    const std::vector<SqlNode *> &GetList() const { return list_; }
+    const NodePointVector &GetList() const { return list_; }
     void Print(std::ostream &output, const std::string &tab) const override;
-    virtual bool Equals(const SqlNodeList *that) const;
+    bool Equals(const SqlNodeList *that) const;
 
  private:
-    std::vector<SqlNode *> list_;
+    NodePointVector list_;
 };
 
 class TypeNode;
@@ -478,9 +478,7 @@ class ExprNode : public SqlNode {
     uint32_t GetChildNum() const { return children_.size(); }
 
     const ExprType GetExprType() const { return expr_type_; }
-    void PushBack(ExprNode *node_ptr) { children_.push_back(node_ptr); }
 
-    std::vector<ExprNode *> children_;
     void Print(std::ostream &output, const std::string &org_tab) const override;
     virtual const std::string GetExprString() const;
     virtual const std::string GenerateExpressionName() const;
@@ -516,10 +514,14 @@ class ExprNode : public SqlNode {
     virtual bool IsListReturn(ExprAnalysisContext *ctx) const { return false; }
 
     /**
-     * Default expression node deep copy implementation
+     * Returns new ExprNode with all of fields copyed, excepting descendants ExprNodes.
      */
     virtual ExprNode *ShadowCopy(NodeManager *) const = 0;
+
     ExprNode *DeepCopy(NodeManager *) const override;
+
+    // Get the compatible type that lhs and rhs can both casted into
+    static absl::StatusOr<const TypeNode *> CompatibleType(NodeManager *, const TypeNode *, const TypeNode *);
 
     static bool IsSafeCast(const TypeNode *from_type, const TypeNode *target_type);
 
@@ -563,6 +565,11 @@ class ExprNode : public SqlNode {
     static Status LikeTypeAccept(node::NodeManager* nm, const TypeNode* lhs, const TypeNode* rhs,
                                  const TypeNode** output);
 
+    static Status RlikeTypeAccept(node::NodeManager* nm, const TypeNode* lhs, const TypeNode* rhs,
+                                 const TypeNode** output);
+
+    std::vector<ExprNode *> children_;
+
  private:
     const TypeNode *output_type_ = nullptr;
     bool nullable_ = true;
@@ -575,6 +582,38 @@ class ExprListNode : public ExprNode {
     const bool IsEmpty() const { return children_.empty(); }
     const std::string GetExprString() const;
     ExprListNode *ShadowCopy(NodeManager *) const override;
+
+    Status InferAttr(ExprAnalysisContext *ctx) override;
+};
+
+// fixed size array
+class ArrayExpr : public ExprNode {
+ public:
+    ArrayExpr() : ExprNode(kExprArray) {}
+    ~ArrayExpr() override {}
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    ArrayExpr *ShadowCopy(NodeManager *) const override;
+
+    Status InferAttr(ExprAnalysisContext *ctx) override;
+
+    // array type may specified type in SQL already, e.g. ARRAY<FLOAT>[1,2,3]
+    TypeNode* specific_type_ = nullptr;
+};
+
+// extract value from array or map value, using '[]' operator
+class ArrayElementExpr : public ExprNode {
+ public:
+    ArrayElementExpr(ExprNode *array, ExprNode *pos);
+    ~ArrayElementExpr() override {}
+
+    ExprNode *array() const;
+    ExprNode *position() const;
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    ArrayElementExpr *ShadowCopy(NodeManager *nm) const override;
 
     Status InferAttr(ExprAnalysisContext *ctx) override;
 };
@@ -599,8 +638,13 @@ class FnNodeList : public FnNode {
 };
 class OrderExpression : public ExprNode {
  public:
+    // expr maybe null
     OrderExpression(const ExprNode *expr, const bool is_asc)
-        : ExprNode(kExprOrderExpression), expr_(expr), is_asc_(is_asc) {}
+        : ExprNode(kExprOrderExpression), expr_(expr), is_asc_(is_asc) {
+        if (expr != nullptr) {
+            AddChild(const_cast<ExprNode *>(expr));
+        }
+    }
     ~OrderExpression() {}
     void Print(std::ostream &output, const std::string &org_tab) const;
     const std::string GetExprString() const;
@@ -615,8 +659,10 @@ class OrderExpression : public ExprNode {
 };
 class OrderByNode : public ExprNode {
  public:
-    explicit OrderByNode(const ExprListNode *order_expressions)
-        : ExprNode(kExprOrder), order_expressions_(order_expressions) {}
+    explicit OrderByNode(ExprListNode *order_expressions)
+        : ExprNode(kExprOrder), order_expressions_(order_expressions) {
+        AddChild(order_expressions);
+    }
     ~OrderByNode() {}
 
     void Print(std::ostream &output, const std::string &org_tab) const;
@@ -641,7 +687,7 @@ class OrderByNode : public ExprNode {
         return order_expression->expr();
     }
     bool is_asc() const { return false; }
-    const ExprListNode *order_expressions_;
+    ExprListNode *order_expressions_;
 };
 class TableRefNode : public SqlNode {
  public:
@@ -659,10 +705,28 @@ class QueryNode : public SqlNode {
  public:
     explicit QueryNode(QueryType query_type) : SqlNode(node::kQuery, 0, 0), query_type_(query_type) {}
     ~QueryNode() {}
+
     void Print(std::ostream &output, const std::string &org_tab) const;
     virtual bool Equals(const SqlNode *node) const;
+
+    void SetWithClauses(absl::Span<WithClauseEntry *> withes) { with_clauses_ = withes; }
+
     const QueryType query_type_;
     std::shared_ptr<OptionsMap> config_options_;
+    absl::Span<WithClauseEntry *> with_clauses_;
+};
+
+class WithClauseEntry : public SqlNode {
+ public:
+    WithClauseEntry(const std::string& alias, QueryNode *query)
+        : SqlNode(node::kWithClauseEntry, 0, 0), alias_(alias), query_(query) {}
+    ~WithClauseEntry() override {}
+
+    void Print(std::ostream &, const std::string &) const override;
+    bool Equals(const SqlNode *node) const override;
+
+    std::string alias_;
+    QueryNode *query_;
 };
 
 class TableNode : public TableRefNode {
@@ -764,15 +828,23 @@ class SelectQueryNode : public QueryNode {
                           bool last_item) const;
 };
 
-class UnionQueryNode : public QueryNode {
+class SetOperationNode : public QueryNode {
  public:
-    UnionQueryNode(const QueryNode *left, const QueryNode *right, bool is_all)
-        : QueryNode(kQueryUnion), left_(left), right_(right), is_all_(is_all) {}
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    virtual bool Equals(const SqlNode *node) const;
-    const QueryNode *left_;
-    const QueryNode *right_;
-    const bool is_all_;
+    SetOperationNode(SetOperationType type, absl::Span<QueryNode *> input, bool distinct)
+        : QueryNode(kQuerySetOperation), op_type_(type), inputs_(input), distinct_(distinct) {}
+    ~SetOperationNode() override {}
+
+    const absl::Span<const QueryNode *const> &inputs() const { return inputs_; }
+    SetOperationType op_type() const { return op_type_; }
+    bool distinct() const { return distinct_; }
+
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    bool Equals(const SqlNode *node) const override;
+
+ private:
+    SetOperationType op_type_;
+    absl::Span<const QueryNode *const> inputs_;
+    bool distinct_ = false;
 };
 
 class ParameterExpr : public ExprNode {
@@ -1158,6 +1230,9 @@ class FrameBound : public SqlNode {
     int64_t GetOffset() const { return offset_; }
     void SetOffset(int64_t v) { offset_ = v; }
 
+    // is offset [OPEN] PRECEDING/FOLLOWING
+    bool is_offset_bound() const;
+
 
     /// \brief get the inclusive frame bound offset value that has signed symbol
     ///
@@ -1319,10 +1394,6 @@ class FrameNode : public SqlNode {
     }
     inline bool IsRowsRangeLikeMaxSizeFrame() const { return IsRowsRangeLikeFrame() && frame_maxsize_ > 0; }
     bool IsPureHistoryFrame() const {
-        if (exclude_current_row_) {
-            return true;
-        }
-
         switch (frame_type_) {
             case kFrameRows: {
                 return GetHistoryRowsEnd() < 0;
@@ -1342,8 +1413,6 @@ class FrameNode : public SqlNode {
 
     FrameNode* ShadowCopy(node::NodeManager* nm) const override;
 
-    // HACK: kind mess but we only turn this flag to turn for specific condition
-    // in physical plan transformation. In case this flag affect other cases
     mutable bool exclude_current_row_ = false;
 
  private:
@@ -1352,6 +1421,7 @@ class FrameNode : public SqlNode {
     FrameExtent *frame_rows_;
     int64_t frame_maxsize_;
 };
+
 class WindowDefNode : public SqlNode {
  public:
     WindowDefNode()
@@ -1384,9 +1454,9 @@ class WindowDefNode : public SqlNode {
     const bool instance_not_in_window() const { return instance_not_in_window_; }
     void set_instance_not_in_window(bool instance_not_in_window) { instance_not_in_window_ = instance_not_in_window; }
     const bool exclude_current_time() const { return exclude_current_time_; }
+
     void set_exclude_current_time(bool exclude_current_time) { exclude_current_time_ = exclude_current_time; }
-    bool exclude_current_row() const { return exclude_current_row_; }
-    void set_exclude_current_row(bool flag) { exclude_current_row_ = flag; }
+    bool exclude_current_row() const { return frame_ptr_ ? frame_ptr_->exclude_current_row_ : false; }
 
     void Print(std::ostream &output, const std::string &org_tab) const;
     bool Equals(const SqlNode *that) const override;
@@ -1403,7 +1473,6 @@ class WindowDefNode : public SqlNode {
     OrderByNode *orders_;       /* ORDER BY (list of SortBy) */
 
     bool exclude_current_time_ = false;
-    bool exclude_current_row_ = false;
     bool instance_not_in_window_ = false;
 };
 
@@ -1416,8 +1485,8 @@ class AllNode : public ExprNode {
         : ExprNode(kExprAll), relation_name_(relation_name), db_name_(db_name) {}
 
     ~AllNode() {}
-    std::string GetRelationName() const { return relation_name_; }
-    std::string GetDBName() const { return db_name_; }
+    const std::string& GetRelationName() const { return relation_name_; }
+    const std::string& GetDBName() const { return db_name_; }
 
     void SetRelationName(const std::string &relation_name) { relation_name_ = relation_name; }
     const std::string GetExprString() const;
@@ -1451,22 +1520,28 @@ class FnDefNode : public SqlNode {
 
 class CastExprNode : public ExprNode {
  public:
-    explicit CastExprNode(const node::DataType cast_type, node::ExprNode *expr)
+    explicit CastExprNode(const node::TypeNode *cast_type, node::ExprNode *expr)
         : ExprNode(kExprCast), cast_type_(cast_type) {
         this->AddChild(expr);
     }
-
     ~CastExprNode() {}
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    const std::string GetExprString() const;
-    virtual bool Equals(const ExprNode *that) const;
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    bool Equals(const ExprNode *that) const override;
     CastExprNode *ShadowCopy(NodeManager *) const override;
     static CastExprNode *CastFrom(ExprNode *node);
 
     ExprNode *expr() const { return GetChild(0); }
-    const DataType cast_type_;
+    const TypeNode *cast_type() const { return cast_type_; }
+
+    // legacy interface, required by offline batch
+    // pls use cast_type() as much as possible
+    node::DataType base_cast_type() const;
 
     Status InferAttr(ExprAnalysisContext *ctx) override;
+
+ private:
+    const TypeNode *cast_type_;
 };
 
 class WhenExprNode : public ExprNode {
@@ -1493,9 +1568,9 @@ class CaseWhenExprNode : public ExprNode {
         this->AddChild(else_expr);
     }
     ~CaseWhenExprNode() {}
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    const std::string GetExprString() const;
-    virtual bool Equals(const ExprNode *that) const;
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    bool Equals(const ExprNode *that) const override;
     CaseWhenExprNode *ShadowCopy(NodeManager *) const override;
 
     ExprListNode *when_expr_list() const { return dynamic_cast<ExprListNode *>(GetChild(0)); }
@@ -1516,9 +1591,9 @@ class CallExprNode : public ExprNode {
 
     ~CallExprNode() {}
 
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    const std::string GetExprString() const;
-    virtual bool Equals(const ExprNode *that) const;
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    bool Equals(const ExprNode *that) const override;
 
     CallExprNode *ShadowCopy(NodeManager *) const override;
     CallExprNode *DeepCopy(NodeManager *) const override;
@@ -1554,6 +1629,10 @@ class BinaryExpr : public ExprNode {
  public:
     BinaryExpr() : ExprNode(kExprBinary) {}
     explicit BinaryExpr(FnOperator op) : ExprNode(kExprBinary), op_(op) {}
+    BinaryExpr(FnOperator op, ExprNode *lhs, ExprNode *rhs) : ExprNode(kExprBinary), op_(op) {
+        AddChild(lhs);
+        AddChild(rhs);
+    }
     FnOperator GetOp() const { return op_; }
 
     void Print(std::ostream &output, const std::string &org_tab) const;
@@ -1595,8 +1674,8 @@ class CondExpr : public ExprNode {
         AddChild(right);
     }
     void Print(std::ostream &output, const std::string &org_tab) const override;
-    const std::string GetExprString() const;
-    virtual bool Equals(const ExprNode *node) const;
+    const std::string GetExprString() const override;
+    bool Equals(const ExprNode *node) const override;
     CondExpr *ShadowCopy(NodeManager *) const override;
 
     ExprNode *GetCondition() const;
@@ -1654,7 +1733,7 @@ class ColumnRefNode : public ExprNode {
 
     static ColumnRefNode *CastFrom(ExprNode *node);
     void Print(std::ostream &output, const std::string &org_tab) const;
-    const std::string GetExprString() const;
+    const std::string GetExprString() const override;
     const std::string GenerateExpressionName() const;
     virtual bool Equals(const ExprNode *node) const;
     ColumnRefNode *ShadowCopy(NodeManager *) const override;
@@ -1699,10 +1778,10 @@ class GetFieldExpr : public ExprNode {
     size_t GetColumnID() const { return column_id_; }
     ExprNode *GetRow() const { return GetChild(0); }
 
-    void Print(std::ostream &output, const std::string &org_tab) const;
-    const std::string GetExprString() const;
-    const std::string GenerateExpressionName() const;
-    virtual bool Equals(const ExprNode *node) const;
+    void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    const std::string GenerateExpressionName() const override;
+    bool Equals(const ExprNode *node) const override;
     GetFieldExpr *ShadowCopy(NodeManager *) const override;
 
     Status InferAttr(ExprAnalysisContext *ctx) override;
@@ -1811,48 +1890,93 @@ class ResTarget : public SqlNode {
     NodePointVector indirection_; /* subscripts, field names, and '*', or NIL */
 };
 
+class ColumnSchemaNode : public SqlNode {
+ public:
+    ColumnSchemaNode(DataType type, bool attr_not_null, const ExprNode *default_val = nullptr)
+        : SqlNode(kColumnSchema, 0, 0), type_(type), not_null_(attr_not_null), default_value_(default_val) {}
+
+    ColumnSchemaNode(DataType type, absl::Span<const ColumnSchemaNode *const> generics, bool attr_not_null,
+                     const ExprNode *default_val)
+        : SqlNode(kColumnSchema, 0, 0),
+          type_(type),
+          generics_(generics.begin(), generics.end()),
+          not_null_(attr_not_null),
+          default_value_(default_val) {}
+    ~ColumnSchemaNode() override {}
+
+    DataType type() const { return type_; }
+    absl::Span<const ColumnSchemaNode *const> generics() const { return generics_; }
+    bool not_null() const { return not_null_; }
+    const ExprNode *default_value() const { return default_value_; }
+
+    absl::Status GetProtoColumnSchema(type::ColumnSchema *) const;
+
+    std::string DebugString() const;
+
+ private:
+    DataType type_;
+    std::vector<const ColumnSchemaNode *> generics_;
+    bool not_null_;
+    const ExprNode* default_value_ = nullptr;
+};
+
 class ColumnDefNode : public SqlNode {
  public:
-    ColumnDefNode() : SqlNode(kColumnDesc, 0, 0), column_name_(""), column_type_() {}
-    ColumnDefNode(const std::string &name, const DataType &data_type, bool op_not_null, ExprNode *default_value)
-        : SqlNode(kColumnDesc, 0, 0),
-          column_name_(name),
-          column_type_(data_type),
-          op_not_null_(op_not_null),
-          default_value_(default_value) {}
+    ColumnDefNode(const std::string &name, const ColumnSchemaNode *schema)
+        : SqlNode(kColumnDesc, 0, 0), column_name_(name), schema_(schema) {}
     ~ColumnDefNode() {}
 
     std::string GetColumnName() const { return column_name_; }
 
-    DataType GetColumnType() const { return column_type_; }
+    const ColumnSchemaNode *schema() const { return schema_; }
 
-    ExprNode* GetDefaultValue() const { return default_value_; }
+    absl::Status GetProtoColumnDef(type::ColumnDef *) const;
 
-    bool GetIsNotNull() const { return op_not_null_; }
+    // deprecated, use ColumnDefNode::schema instead
+    DataType GetColumnType() const { return schema_->type(); }
+
+    const ExprNode* GetDefaultValue() const { return schema_->default_value(); }
+
+    bool GetIsNotNull() const { return schema_->not_null(); }
+
     void Print(std::ostream &output, const std::string &org_tab) const;
 
  private:
     std::string column_name_;
-    DataType column_type_;
-    bool op_not_null_;
-    ExprNode* default_value_ = nullptr;
+    const ColumnSchemaNode* schema_;
 };
 
 class InsertStmt : public SqlNode {
  public:
+    // ref zetasql ASTInsertStatement
+     enum InsertMode {
+        DEFAULT_MODE,  // plain INSERT
+        REPLACE,       // INSERT OR REPLACE
+        UPDATE,        // INSERT OR UPDATE
+        IGNORE         // INSERT OR IGNORE
+    };
+
     InsertStmt(const std::string &db_name,
                const std::string &table_name,
                const std::vector<std::string> &columns,
-               const std::vector<ExprNode *> &values)
+               const std::vector<ExprNode *> &values,
+               InsertMode insert_mode)
         : SqlNode(kInsertStmt, 0, 0),
           db_name_(db_name),
           table_name_(table_name),
           columns_(columns),
           values_(values),
-          is_all_(columns.empty()) {}
+          is_all_(columns.empty()),
+          insert_mode_(insert_mode) {}
 
-    InsertStmt(const std::string &db_name, const std::string &table_name, const std::vector<ExprNode *> &values)
-        : SqlNode(kInsertStmt, 0, 0), db_name_(db_name), table_name_(table_name), values_(values), is_all_(true) {}
+    InsertStmt(const std::string &db_name, const std::string &table_name, const std::vector<ExprNode *> &values,
+               InsertMode insert_mode)
+        : SqlNode(kInsertStmt, 0, 0),
+          db_name_(db_name),
+          table_name_(table_name),
+          values_(values),
+          is_all_(true),
+          insert_mode_(insert_mode) {}
     void Print(std::ostream &output, const std::string &org_tab) const;
 
     const std::string db_name_;
@@ -1860,6 +1984,7 @@ class InsertStmt : public SqlNode {
     const std::vector<std::string> columns_;
     const std::vector<ExprNode *> values_;
     const bool is_all_;
+    const InsertMode insert_mode_;
 };
 
 class StorageModeNode : public SqlNode {
@@ -1879,6 +2004,45 @@ class StorageModeNode : public SqlNode {
     StorageMode storage_mode_;
 };
 
+class CompressTypeNode : public SqlNode {
+ public:
+    CompressTypeNode() : SqlNode(kCompressType, 0, 0), compress_type_(kNoCompress) {}
+
+    explicit CompressTypeNode(CompressType compress_type)
+        : SqlNode(kCompressType, 0, 0), compress_type_(compress_type) {}
+
+    ~CompressTypeNode() {}
+
+    CompressType GetCompressType() const { return compress_type_; }
+
+    void Print(std::ostream &output, const std::string &org_tab) const;
+
+ private:
+    CompressType compress_type_;
+};
+
+class CreateTableLikeClause {
+ public:
+    CreateTableLikeClause() = default;
+    enum LikeKind { PARQUET = 0, HIVE = 1 };
+
+    static std::string ToKindString(LikeKind kind) {
+        switch (kind) {
+            case PARQUET:
+                return "PARQUET";
+            case HIVE:
+                return "HIVE";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    void Print(std::ostream &, const std::string &) const;
+
+    LikeKind kind_;
+    std::string path_;
+};
+
 class CreateStmt : public SqlNode {
  public:
     CreateStmt()
@@ -1891,8 +2055,11 @@ class CreateStmt : public SqlNode {
 
     ~CreateStmt() {}
 
-    NodePointVector* MutableColumnDefList() { return &column_desc_list_; }
-    const NodePointVector &GetColumnDefList() const { return column_desc_list_; }
+    NodePointVector* MutableTableElementList() { return &column_desc_list_; }
+    const NodePointVector &GetTableElementList() const { return column_desc_list_; }
+
+    // collect the column definitions in column_desc_list_, and convert to the proto representation type::ColumnDef
+    absl::StatusOr<codec::Schema> GetColumnDefListAsSchema() const;
 
     std::string GetTableName() const { return table_name_; }
     std::string GetDbName() const { return db_name_; }
@@ -1904,6 +2071,9 @@ class CreateStmt : public SqlNode {
 
     void Print(std::ostream &output, const std::string &org_tab) const;
 
+    // refactor later, I'd keep it simple currently
+    std::shared_ptr<CreateTableLikeClause> like_clause_ = nullptr;
+
  private:
     std::string db_name_;
     std::string table_name_;
@@ -1914,14 +2084,19 @@ class CreateStmt : public SqlNode {
 class IndexKeyNode : public SqlNode {
  public:
     IndexKeyNode() : SqlNode(kIndexKey, 0, 0) {}
-    explicit IndexKeyNode(const std::string &key) : SqlNode(kIndexKey, 0, 0), key_({key}) {}
-    explicit IndexKeyNode(const std::vector<std::string> &keys) : SqlNode(kIndexKey, 0, 0), key_(keys) {}
+    explicit IndexKeyNode(const std::string &key, const std::string &type)
+        : SqlNode(kIndexKey, 0, 0), key_({key}), index_type_(type) {}
+    explicit IndexKeyNode(const std::vector<std::string> &keys, const std::string &type)
+        : SqlNode(kIndexKey, 0, 0), key_(keys), index_type_(type) {}
     ~IndexKeyNode() {}
     void AddKey(const std::string &key) { key_.push_back(key); }
+    void SetIndexType(const std::string &type) { index_type_ = type; }
     std::vector<std::string> &GetKey() { return key_; }
+    std::string &GetIndexType() { return index_type_; }
 
  private:
     std::vector<std::string> key_;
+    std::string index_type_ = "key";
 };
 class IndexVersionNode : public SqlNode {
  public:
@@ -1975,6 +2150,7 @@ class ColumnIndexNode : public SqlNode {
  public:
     ColumnIndexNode()
         : SqlNode(kColumnIndex, 0, 0),
+          index_type_("key"),
           ts_(""),
           version_(""),
           version_count_(0),
@@ -1985,6 +2161,8 @@ class ColumnIndexNode : public SqlNode {
 
     std::vector<std::string> &GetKey() { return key_; }
     void SetKey(const std::vector<std::string> &key) { key_ = key; }
+    void SetIndexType(const std::string &type) { index_type_ = type; }
+    std::string &GetIndexType() { return index_type_; }
 
     std::string GetTs() const { return ts_; }
 
@@ -2013,6 +2191,7 @@ class ColumnIndexNode : public SqlNode {
 
  private:
     std::vector<std::string> key_;
+    std::string index_type_;
     std::string ts_;
     std::string version_;
     int version_count_;
@@ -2056,6 +2235,23 @@ class CmdNode : public SqlNode {
     std::vector<std::string> args_;
     bool if_not_exist_ = false;
     bool if_exist_ = false;
+};
+
+class ShowNode : public SqlNode {
+ public:
+     ShowNode(ShowStmtType show_type, const std::string& target, const std::string like)
+         : SqlNode(kShowStmt, 0, 0), show_type_(show_type), target_(target), like_str_(like) {}
+
+     const std::string& GetTarget() const { return target_; }
+     ShowStmtType GetShowType() const { return show_type_; }
+     const std::string& GetLikeStr() const { return like_str_; }
+    void Print(std::ostream &output, const std::string &org_tab) const;
+    bool Equals(const SqlNode *node) const override;
+
+ private:
+    ShowStmtType show_type_;
+    std::string target_;
+    std::string like_str_;
 };
 
 enum class DeleteTarget {
@@ -2200,6 +2396,96 @@ class CreateIndexNode : public SqlNode {
     const std::string db_name_;
     const std::string table_name_;
     node::ColumnIndexNode *index_;
+};
+
+class CreateUserNode : public SqlNode {
+ public:
+    explicit CreateUserNode(const std::string &name,
+            bool if_not_exists, const std::shared_ptr<OptionsMap>& options)
+        : SqlNode(kCreateUserStmt, 0, 0),
+        name_(name), if_not_exists_(if_not_exists), options_(options) {}
+    void Print(std::ostream &output, const std::string &org_tab) const;
+    const std::string& Name() const { return name_; }
+    bool IfNotExists() const { return if_not_exists_; }
+    const std::shared_ptr<OptionsMap> Options() const { return options_; }
+
+ private:
+    const std::string name_;
+    bool if_not_exists_;
+    const std::shared_ptr<OptionsMap> options_;
+};
+
+class AlterUserNode : public SqlNode {
+ public:
+    explicit AlterUserNode(const std::string &name, bool if_exists, const std::shared_ptr<OptionsMap>& options)
+        : SqlNode(kAlterUserStmt, 0, 0), name_(name), if_exists_(if_exists), options_(options) {}
+    void Print(std::ostream &output, const std::string &org_tab) const;
+    const std::string& Name() const { return name_; }
+    bool IfExists() const { return if_exists_; }
+    const std::shared_ptr<OptionsMap> Options() const { return options_; }
+
+ private:
+    const std::string name_;
+    bool if_exists_ = false;
+    const std::shared_ptr<OptionsMap> options_;
+};
+
+class GrantNode : public SqlNode {
+ public:
+    explicit GrantNode(std::optional<std::string> target_type, std::string database, std::string target,
+                       std::vector<std::string> privileges, bool is_all_privileges, std::vector<std::string> grantees,
+                       bool with_grant_option)
+        : SqlNode(kGrantStmt, 0, 0),
+          target_type_(target_type),
+          database_(database),
+          target_(target),
+          privileges_(privileges),
+          is_all_privileges_(is_all_privileges),
+          grantees_(grantees),
+          with_grant_option_(with_grant_option) {}
+    const std::vector<std::string> Privileges() const { return privileges_; }
+    const std::vector<std::string> Grantees() const { return grantees_; }
+    const std::string Database() const { return database_; }
+    const std::string Target() const { return target_; }
+    const std::optional<std::string> TargetType() const { return target_type_; }
+    const bool IsAllPrivileges() const { return is_all_privileges_; }
+    const bool WithGrantOption() const { return with_grant_option_; }
+
+ private:
+    std::optional<std::string> target_type_;
+    std::string database_;
+    std::string target_;
+    std::vector<std::string> privileges_;
+    bool is_all_privileges_;
+    std::vector<std::string> grantees_;
+    bool with_grant_option_;
+};
+
+class RevokeNode : public SqlNode {
+ public:
+    explicit RevokeNode(std::optional<std::string> target_type, std::string database, std::string target,
+                        std::vector<std::string> privileges, bool is_all_privileges, std::vector<std::string> grantees)
+        : SqlNode(kRevokeStmt, 0, 0),
+          target_type_(target_type),
+          database_(database),
+          target_(target),
+          privileges_(privileges),
+          is_all_privileges_(is_all_privileges),
+          grantees_(grantees) {}
+    const std::vector<std::string> Privileges() const { return privileges_; }
+    const std::vector<std::string> Grantees() const { return grantees_; }
+    const std::string Database() const { return database_; }
+    const std::string Target() const { return target_; }
+    const std::optional<std::string> TargetType() const { return target_type_; }
+    const bool IsAllPrivileges() const { return is_all_privileges_; }
+
+ private:
+    std::optional<std::string> target_type_;
+    std::string database_;
+    std::string target_;
+    std::vector<std::string> privileges_;
+    bool is_all_privileges_;
+    std::vector<std::string> grantees_;
 };
 
 class ExplainNode : public SqlNode {
@@ -2363,6 +2649,7 @@ class FnReturnStmt : public FnNode {
     ExprNode *return_expr_;
 };
 
+// DEPRECATED!
 class StructExpr : public ExprNode {
  public:
     explicit StructExpr(const std::string &name) : ExprNode(kExprStruct), class_name_(name) {}
@@ -2381,6 +2668,26 @@ class StructExpr : public ExprNode {
     const std::string class_name_;
     FnNodeList *fileds_;
     FnNodeList *methods_;
+};
+
+// (expr1, expr2, ...)
+class StructCtorWithParens : public ExprNode {
+ public:
+    explicit StructCtorWithParens(absl::Span<ExprNode *const> fields)
+        : ExprNode(kExprStructCtorParens) {
+        for (auto e : fields) {
+            AddChild(e);
+        }
+    }
+    ~StructCtorWithParens() override {}
+
+    absl::Span<ExprNode *const> fields() const { return children_; }
+
+    // LOW priority
+    // void Print(std::ostream &output, const std::string &org_tab) const override;
+    const std::string GetExprString() const override;
+    StructCtorWithParens *ShadowCopy(NodeManager *nm) const override;
+    Status InferAttr(ExprAnalysisContext *ctx) override;
 };
 
 class ExternalFnDefNode : public FnDefNode {
@@ -2667,7 +2974,7 @@ class UdafDefNode : public FnDefNode {
 
     size_t GetArgSize() const override { return arg_types_.size(); }
 
-    const TypeNode *GetArgType(size_t i) const { return arg_types_[i]; }
+    const TypeNode *GetArgType(size_t i) const override { return arg_types_[i]; }
     const std::vector<const TypeNode *> &GetArgTypeList() const { return arg_types_; }
 
     UdafDefNode *ShadowCopy(NodeManager *) const override;
@@ -2679,6 +2986,64 @@ class UdafDefNode : public FnDefNode {
     ExprNode *init_expr_;
     FnDefNode *update_;
     FnDefNode *merge_;
+    FnDefNode *output_;
+};
+
+class VariadicUdfDefNode : public FnDefNode {
+ public:
+    VariadicUdfDefNode(const std::string &name,
+                       FnDefNode *init_func,
+                       const std::vector<FnDefNode *>& update_func,
+                       FnDefNode *output_func)
+        : FnDefNode(kVariadicUdfDef),
+          name_(name),
+          init_(init_func),
+          update_(update_func),
+          output_(output_func) {}
+
+    const std::string GetName() const override { return name_; }
+    const TypeNode *GetReturnType() const override { return output_->GetReturnType(); }
+    bool IsReturnNullable() const override { return output_->IsReturnNullable(); }
+    size_t GetArgSize() const override {
+        return init_->GetArgSize() + update_.size();
+    }
+    const TypeNode *GetArgType(size_t i) const override {
+        if (i < init_->GetArgSize()) {
+            return init_->GetArgType(i);
+        } else {
+            return update_[i - init_->GetArgSize()]->GetArgType(1);
+        }
+    }
+    bool IsArgNullable(size_t i) const override {
+        if (i < init_->GetArgSize()) {
+            return init_->IsArgNullable(i);
+        } else {
+            return update_[i - init_->GetArgSize()]->IsArgNullable(1);
+        }
+    }
+
+    base::Status Validate(const std::vector<const TypeNode *> &arg_types) const override {
+        return Status::OK();
+    }
+
+    void Print(std::ostream &output, const std::string &tab) const override;
+    bool Equals(const SqlNode *node) const override;
+
+    VariadicUdfDefNode *ShadowCopy(NodeManager *) const override;
+    VariadicUdfDefNode *DeepCopy(NodeManager *) const override;
+
+    FnDefNode *init_func() const { return init_; }
+    const std::vector<FnDefNode *> &update_func() const { return update_; }
+    FnDefNode *output_func() const { return output_; }
+
+ private:
+    std::string name_;
+    std::vector<const node::TypeNode *> arg_types_;
+    std::vector<int> arg_nullable_;
+    const node::TypeNode *ret_type_;
+    bool ret_nullable_;
+    FnDefNode *init_;
+    std::vector<FnDefNode *> update_;
     FnDefNode *output_;
 };
 
@@ -2736,17 +3101,17 @@ class PartitionNumNode : public SqlNode {
 
 class DistributionsNode : public SqlNode {
  public:
-    explicit DistributionsNode(SqlNodeList *distribution_list)
+    explicit DistributionsNode(const NodePointVector& distribution_list)
         : SqlNode(kDistributions, 0, 0), distribution_list_(distribution_list) {}
 
     ~DistributionsNode() {}
 
-    const SqlNodeList *GetDistributionList() const { return distribution_list_; }
+    const NodePointVector& GetDistributionList() const { return distribution_list_; }
 
     void Print(std::ostream &output, const std::string &org_tab) const;
 
  private:
-    SqlNodeList *distribution_list_;
+    NodePointVector distribution_list_;
 };
 
 class CreateSpStmt : public SqlNode {
@@ -2788,6 +3153,20 @@ class InputParameterNode : public SqlNode {
     std::string column_name_;
     DataType column_type_;
     bool is_constant_;
+};
+
+class CallStmt : public SqlNode {
+ public:
+    CallStmt(const std::vector<std::string> names, const std::vector<ExprNode *> args)
+        : SqlNode(kCallStmt, 0, 0), procedure_name_(names), arguments_(args) {}
+    ~CallStmt() override {}
+
+    const std::vector<std::string> &procedure_name() const { return procedure_name_; }
+    const std::vector<ExprNode *> &arguments() const { return arguments_; }
+
+ private:
+    const std::vector<std::string> procedure_name_;
+    const std::vector<ExprNode*> arguments_;
 };
 
 std::string ExprString(const ExprNode *expr);

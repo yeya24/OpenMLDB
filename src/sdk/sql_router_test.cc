@@ -29,6 +29,7 @@
 #include "gflags/gflags.h"
 #include "gtest/gtest.h"
 #include "sdk/mini_cluster.h"
+#include "test/util.h"
 #include "vm/catalog.h"
 
 namespace openmldb::sdk {
@@ -705,8 +706,6 @@ TEST_F(SQLRouterTest, testSqlInsertPlaceholderWithColumnKey2) {
     ASSERT_EQ(day, 22);
     ASSERT_EQ(789, rs->GetInt32Unsafe(3));
 
-
-
     ASSERT_FALSE(rs->Next());
 
     status = ::hybridse::sdk::Status();
@@ -792,7 +791,7 @@ TEST_F(SQLRouterTest, test_sql_insert_placeholder_with_type_check) {
     std::string insert4 = "insert into " + name + " values('hello', ?, '2020-02-29', 2.33, 2.33, 123, 123);";
     status = hybridse::sdk::Status();
     std::shared_ptr<SQLInsertRow> r4 = router_->GetInsertRow(db, insert4, &status);
-    ASSERT_EQ(status.code, 1);
+    ASSERT_EQ(status.code, hybridse::common::StatusCode::kCmdError) << status.ToString();
 
     int32_t year;
     int32_t month;
@@ -1138,10 +1137,10 @@ TEST_F(SQLRouterTest, DDLParseMethods) {
     // sorted by table name, so adinfo is the first table
     EXPECT_EQ(
         "CREATE TABLE IF NOT EXISTS adinfo(\n\tid string,\n\tbrandName string,\n\tbrandId string,\n\tname "
-        "string,\n\tingestionTime timestamp,\n\tindex(key=(id), ttl=0m, ttl_type=absolute)\n);",
+        "string,\n\tingestionTime timestamp,\n\tindex(key=(id), ttl=1, ttl_type=latest)\n);",
         ddl_list.at(0));
 
-    auto output_schema = GenOutputSchema(sql, table_map);
+    auto output_schema = GenOutputSchema(sql, "foo", {{"foo", table_map}});
     ASSERT_EQ(output_schema->GetColumnCnt(), 7);
     std::vector<std::string> output_col_names;
     output_col_names.reserve(output_schema->GetColumnCnt());
@@ -1150,6 +1149,37 @@ TEST_F(SQLRouterTest, DDLParseMethods) {
     }
     std::vector<std::string> expected{"itemId", "ip", "query", "mcuid", "name", "brandId", "label"};
     ASSERT_EQ(output_col_names, expected);
+
+    // multi db output schema
+    std::vector<std::pair<std::string, decltype(table_map)>> db_table_map;
+    db_table_map.emplace_back("db1", table_map);
+    db_table_map.emplace_back("db2", table_map);
+    // feedbackTable is in db1(used_db)
+    auto multi_db_output_schema = GenOutputSchema(
+        "SELECT\n db1.behaviourTable.itemId as itemId,\n  db1.behaviourTable.ip as ip,\n  db1.behaviourTable.query as "
+        "query,\n  "
+        "db1.behaviourTable.mcuid as mcuid,\n db2.adinfo.brandName as name,\n  db2.adinfo.brandId as brandId,\n "
+        "feedbackTable.actionValue as label\n FROM db1.behaviourTable\n LAST JOIN feedbackTable ON "
+        "feedbackTable.itemId = "
+        "behaviourTable.itemId\n LAST JOIN db2.adinfo ON behaviourTable.itemId = db2.adinfo.id;",
+        "db1", db_table_map);
+    ASSERT_TRUE(multi_db_output_schema);
+    ASSERT_EQ(multi_db_output_schema->GetColumnCnt(), 7);
+
+    // no use db
+    auto db_table_sql =
+        "SELECT\n db1.behaviourTable.itemId as itemId,\n  db1.behaviourTable.ip as ip,\n  db1.behaviourTable.query as "
+        "query,\n  "
+        "db1.behaviourTable.mcuid as mcuid,\n db2.adinfo.brandName as name,\n  db2.adinfo.brandId as brandId,\n "
+        "feedbackTable.actionValue as label\n FROM db1.behaviourTable behaviourTable\n LAST JOIN db1.feedbackTable "
+        "feedbackTable ON feedbackTable.itemId = behaviourTable.itemId\n LAST JOIN db2.adinfo ON behaviourTable.itemId "
+        "= db2.adinfo.id;";
+    multi_db_output_schema = GenOutputSchema(db_table_sql, "", db_table_map);
+    ASSERT_TRUE(multi_db_output_schema);
+    ASSERT_EQ(multi_db_output_schema->GetColumnCnt(), 7);
+
+    auto tables = GetDependentTables(db_table_sql, "", db_table_map);
+    ASSERT_EQ(tables.size(), 3);
 }
 
 TEST_F(SQLRouterTest, DDLParseMethodsCombineIndex) {
@@ -1197,12 +1227,78 @@ TEST_F(SQLRouterTest, DDLParseMethodsCombineIndex) {
         ddl_list.at(0));
 }
 
+TEST_F(SQLRouterTest, SQLToDAG) {
+    auto sql = R"(WITH q1 as (
+        WITH q3 as (select * from t1 ORDER BY ts),
+        q4 as (select * from t2 LIMIT 10)
+
+        select * from q3 left join q4 on q3.key = q4.key
+        ),
+        q2 as (select * from t3)
+
+        select * from q1 last join q2 on q1.id = q2.id)";
+
+
+    hybridse::sdk::Status status;
+    auto dag = router_->SQLToDAG(sql, &status);
+    ASSERT_TRUE(status.IsOK());
+
+    std::string_view q3 = R"(SELECT
+  *
+FROM
+  t1
+ORDER BY ts
+)";
+    std::string_view q4 = R"(SELECT
+  *
+FROM
+  t2
+LIMIT 10
+)";
+    std::string_view q2 = R"(SELECT
+  *
+FROM
+  t3
+)";
+    std::string_view q1 = R"(SELECT
+  *
+FROM
+  q3
+  LEFT JOIN
+  q4
+  ON q3.key = q4.key
+)";
+    std::string_view q = R"(SELECT
+  *
+FROM
+  q1
+  LAST JOIN
+  q2
+  ON q1.id = q2.id
+)";
+
+    std::shared_ptr<DAGNode> dag_q3 = std::make_shared<DAGNode>("q3", q3);
+    std::shared_ptr<DAGNode> dag_q4 = std::make_shared<DAGNode>("q4", q4);
+
+    std::shared_ptr<DAGNode> dag_q1 =
+        std::make_shared<DAGNode>("q1", q1, std::vector<std::shared_ptr<DAGNode>>({dag_q3, dag_q4}));
+    std::shared_ptr<DAGNode> dag_q2 = std::make_shared<DAGNode>("q2", q2);
+
+    std::shared_ptr<DAGNode> expect =
+        std::make_shared<DAGNode>("", q, std::vector<std::shared_ptr<DAGNode>>({dag_q1, dag_q2}));
+
+    EXPECT_EQ(*dag, *expect);
+}
+
 }  // namespace openmldb::sdk
 
 int main(int argc, char** argv) {
-    ::hybridse::vm::Engine::InitializeGlobalLLVM();
     ::testing::InitGoogleTest(&argc, argv);
     ::google::ParseCommandLineFlags(&argc, &argv, true);
+    ::hybridse::vm::Engine::InitializeGlobalLLVM();
+    ::openmldb::test::InitRandomDiskFlags("sql_router_test");
+
+    ::openmldb::base::SetupGlog(true);
     FLAGS_zk_session_timeout = 100000;
     ::openmldb::sdk::MiniCluster mc(6181);
     ::openmldb::sdk::mc_ = &mc;

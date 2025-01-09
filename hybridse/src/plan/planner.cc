@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <map>
-#include <random>
 #include <set>
 #include <string>
 #include <utility>
@@ -30,6 +29,7 @@
 #include "proto/fe_common.pb.h"
 #include "udf/default_udf_library.h"
 #include "vm/engine.h"
+
 namespace hybridse {
 namespace plan {
 
@@ -38,6 +38,8 @@ inline bool IsCurRowRelativeWinFun(absl::string_view fn_name) {
     return absl::EqualsIgnoreCase("lag", fn_name) || absl::EqualsIgnoreCase("at", fn_name) ||
            absl::EqualsIgnoreCase("lead", fn_name);
 }
+
+base::Status ConvertCall(const node::CallStmt* call, node::NodeManager* nm, node::CallStmtPlan** out);
 
 Planner::Planner(node::NodeManager *manager, const bool is_batch_mode, const bool is_cluster_optimized,
         const bool enable_batch_window_parallelization,
@@ -60,26 +62,56 @@ Planner::Planner(node::NodeManager *manager, const bool is_batch_mode, const boo
     }
 }
 
-base::Status Planner::CreateQueryPlan(const node::QueryNode *root, PlanNode **plan_tree) {
+base::Status Planner::CreateQueryPlan(const node::QueryNode *root, node::QueryPlanNode **plan_tree) {
     CHECK_TRUE(nullptr != root, common::kPlanError, "can not create query plan node with null query node");
+
+    auto out = node_manager_->MakeNode<node::QueryPlanNode>();
+
+    if (!root->with_clauses_.empty()) {
+        auto with_list = node_manager_->MakeList<node::WithClauseEntryPlanNode>();
+        for (auto q : root->with_clauses_) {
+            node::QueryPlanNode *with = nullptr;
+            // CHECK_TRUE(q->query_->query_type_ == node::kQuerySelect, common::kPlanError,
+            //            "only support select query as with clause entry");
+            CHECK_STATUS(CreateQueryPlan(q->query_, &with));
+
+            auto with_entry = node_manager_->MakeNode<node::WithClauseEntryPlanNode>(q->alias_, with);
+
+            with_list->data_.push_back(with_entry);
+        }
+        out->with_clauses_ = absl::MakeSpan(with_list->data_);
+    }
+
+    if (root->config_options_ != nullptr) {
+        out->config_options_ = root->config_options_;
+    }
+
     switch (root->query_type_) {
-        case node::kQuerySelect:
-            CHECK_STATUS(CreateSelectQueryPlan(dynamic_cast<const node::SelectQueryNode *>(root), plan_tree))
+        case node::kQuerySelect: {
+            node::PlanNode* query_input = nullptr;
+            CHECK_STATUS(CreateSelectQueryPlan(dynamic_cast<const node::SelectQueryNode *>(root), &query_input));
+            out->AddChild(query_input);
             break;
-        case node::kQueryUnion:
-            CHECK_STATUS(CreateUnionQueryPlan(dynamic_cast<const node::UnionQueryNode *>(root), plan_tree))
+        }
+        case node::kQuerySetOperation: {
+            node::SetOperationPlanNode* un = nullptr;
+            CHECK_STATUS(CreateSetOperationPlan(dynamic_cast<const node::SetOperationNode *>(root), &un));
+            out->AddChild(un);
             break;
+        }
         default: {
             FAIL_STATUS(common::kPlanError, "can not create query plan node with invalid query type " +
-                                                node::QueryTypeName(root->query_type_))
+                                                node::QueryTypeName(root->query_type_));
         }
     }
+
+    *plan_tree = out;
     return base::Status::OK();
 }
 // TODO(chenjing): refactor SELECT query logical plan
 // Deal with group by clause, order clause, having clause in physical plan instead of logical plan, since we need
 // schema context for column resolve.
-base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, PlanNode **plan_tree) {
+base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, node::PlanNode **plan_tree) {
     const node::NodePointVector &table_ref_list =
         nullptr == root->GetTableRefList() ? std::vector<SqlNode *>() : root->GetTableRefList()->GetList();
     std::vector<node::PlanNode *> relation_nodes;
@@ -178,7 +210,11 @@ base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, P
         // expand window frame for lag funtions early
         if (project_expr->GetExprType() == node::kExprCall) {
             auto *call_expr = dynamic_cast<node::CallExprNode *>(project_expr);
-            if (call_expr != nullptr && IsCurRowRelativeWinFun(call_expr->GetFnDef()->GetName())) {
+            if (call_expr != nullptr && call_expr->GetOver() != nullptr &&
+                IsCurRowRelativeWinFun(call_expr->GetFnDef()->GetName())) {
+                // current row window constructed only for `lag(col, 1) over w`,
+                // not for nested window aggregation from kids,
+                //   like `lag(split_by_key(count_cate_where(col, ...) over w, ",", ":"), 1)`
                 auto s = ConstructWindowForLag(w_ptr, call_expr);
                 CHECK_TRUE(s.ok(), common::kUnsupportSql, s.status().ToString());
                 w_ptr = s.value();
@@ -265,7 +301,7 @@ base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, P
         auto first_window_project = dynamic_cast<node::ProjectListNode *>(project_list_vec[1]);
         node::ProjectListNode *merged_project =
             node_manager_->MakeProjectListPlanNode(first_window_project->GetW(), true);
-        if (!is_cluster_optimized_ && !enable_batch_window_parallelization_ &&
+        if  (!is_cluster_optimized_ && !enable_batch_window_parallelization_ &&
             node::ProjectListNode::MergeProjectList(simple_project, first_window_project, merged_project)) {
             project_list_vec[0] = nullptr;
             project_list_vec[1] = merged_project;
@@ -290,7 +326,8 @@ base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, P
         project_list_id++;
     }
 
-    current_node = node_manager_->MakeProjectPlanNode(current_node, table_name, project_list_without_null, pos_mapping);
+    current_node = node_manager_->MakeNode<node::ProjectPlanNode>(current_node, table_name, project_list_without_null,
+                                                                  pos_mapping);
 
     // distinct
     if (root->distinct_opt_) {
@@ -305,30 +342,26 @@ base::Status Planner::CreateSelectQueryPlan(const node::SelectQueryNode *root, P
         const node::LimitNode *limit_ptr = static_cast<const node::LimitNode *>(root->GetLimit());
         current_node = node_manager_->MakeLimitPlanNode(current_node, limit_ptr->GetLimitCount());
     }
-    current_node = node_manager_->MakeSelectPlanNode(current_node);
-    if (root->config_options_ != nullptr) {
-        dynamic_cast<node::QueryPlanNode*>(current_node)->config_options_ = root->config_options_;
-    }
+
     *plan_tree = current_node;
     return base::Status::OK();
 }
 
-base::Status Planner::CreateUnionQueryPlan(const node::UnionQueryNode *root, PlanNode **plan_tree) {
+base::Status Planner::CreateSetOperationPlan(const node::SetOperationNode *root,
+                                             node::SetOperationPlanNode **plan_tree) {
     CHECK_TRUE(nullptr != root, common::kPlanError, "can not create query plan node with null query node")
 
-    node::PlanNode *left_plan = nullptr;
-    node::PlanNode *right_plan = nullptr;
-    CHECK_STATUS(CreateQueryPlan(root->left_, &left_plan), common::kPlanError,
-                 "can not create union query plan left query")
-    CHECK_STATUS(CreateQueryPlan(root->right_, &right_plan), common::kPlanError,
-                 "can not create union query plan right query")
-    auto res = node_manager_->MakeUnionPlanNode(left_plan, right_plan, root->is_all_);
-    if (root->config_options_ != nullptr) {
-        dynamic_cast<node::UnionPlanNode*>(res)->config_options_ = root->config_options_;
+    auto list = node_manager_->MakeList<node::QueryPlanNode>();
+    for (auto n : root->inputs()) {
+        node::QueryPlanNode* query = nullptr;
+        CHECK_STATUS(CreateQueryPlan(n, &query));
+        list->data_.push_back(query);
     }
-    *plan_tree = res;
+    auto span = absl::MakeSpan(list->data_);
+    *plan_tree = node_manager_->MakeNode<node::SetOperationPlanNode>(root->op_type(), span, root->distinct());
     return base::Status::OK();
 }
+
 base::Status Planner::CheckWindowFrame(const node::WindowDefNode *w_ptr) {
     CHECK_TRUE(nullptr != w_ptr->GetFrame(), common::kPlanError,
                "fail to create project list node: frame can't be unbound ")
@@ -378,7 +411,6 @@ base::Status Planner::FillInWindowPlanNode(const node::WindowDefNode *w_ptr, nod
         }
         w_node_ptr->set_instance_not_in_window(w_ptr->instance_not_in_window());
         w_node_ptr->set_exclude_current_time(w_ptr->exclude_current_time());
-        w_node_ptr->set_exclude_current_row(w_ptr->exclude_current_row());
     }
     return base::Status::OK();
 }
@@ -406,7 +438,7 @@ base::Status Planner::CreateCreateFunctionPlanNode(const node::CreateFunctionNod
 
 base::Status Planner::CreateSelectIntoPlanNode(const node::SelectIntoNode *root, node::PlanNode **output) {
     CHECK_TRUE(nullptr != root, common::kPlanError, "fail to create select into plan with null node");
-    PlanNode *query = nullptr;
+    node::QueryPlanNode *query = nullptr;
     CHECK_STATUS(CreateQueryPlan(root->Query(), &query))
     *output = node_manager_->MakeSelectIntoPlanNode(query, root->QueryStr(), root->OutFile(), root->Options(),
                                                     root->ConfigOptions());
@@ -422,41 +454,41 @@ base::Status Planner::CreateSetPlanNode(const node::SetNode *root, node::PlanNod
 base::Status Planner::CreateCreateTablePlan(const node::SqlNode *root, node::PlanNode **output) {
     CHECK_TRUE(nullptr != root, common::kPlanError, "fail to create table plan with null node")
     auto create_tree = dynamic_cast<const node::CreateStmt *>(root);
-    *output = node_manager_->MakeCreateTablePlanNode(create_tree->GetDbName(), create_tree->GetTableName(),
-                                                     create_tree->GetColumnDefList(), create_tree->GetTableOptionList(),
-                                                     create_tree->GetOpIfNotExist());
+    auto *out = node_manager_->MakeCreateTablePlanNode(
+        create_tree->GetDbName(), create_tree->GetTableName(), create_tree->GetTableElementList(),
+        create_tree->GetTableOptionList(), create_tree->GetOpIfNotExist());
+    out->like_clause_ = create_tree->like_clause_;
+    *output = out;
     return base::Status::OK();
 }
-/// Check if current plan node is depend on a [table|simple select table/rename table/ sub query table)
+
+/// Check if current plan node is depend on a (table|simple select table/rename table/sub query table)
 /// Store TablePlanNode into output if true
-bool Planner::IsTable(node::PlanNode *node, node::PlanNode** output) {
+absl::StatusOr<node::TablePlanNode*> Planner::IsTable(node::PlanNode *node) {
     if (nullptr == node) {
-        return false;
+        return absl::InvalidArgumentError("null node");
     }
 
     switch (node->type_) {
         case node::kPlanTypeTable: {
-            *output = node;
-            return true;
+            return dynamic_cast<node::TablePlanNode*>(node);
         }
         case node::kPlanTypeRename: {
-            return IsTable(node->GetChildren()[0], output);
+            return IsTable(node->GetChildren()[0]);
         }
         case node::kPlanTypeQuery: {
-            return IsTable(dynamic_cast<node::QueryPlanNode *>(node)->GetChildren()[0], output);
+            return IsTable(dynamic_cast<node::QueryPlanNode *>(node)->GetChildren()[0]);
         }
         case node::kPlanTypeProject: {
             if ((dynamic_cast<node::ProjectPlanNode *>(node))->IsSimpleProjectPlan()) {
-                return IsTable(node->GetChildren()[0], output);
-            } else {
-                return false;
+                return IsTable(node->GetChildren()[0]);
             }
+            break;
         }
-        default: {
-            return false;
-        }
+        default:
+            break;
     }
-    return false;
+    return absl::NotFoundError("not found");
 }
 
 // Validate online serving op with given plan tree
@@ -465,6 +497,7 @@ bool Planner::IsTable(node::PlanNode *node, node::PlanNode** output) {
 //   - SELECT
 //   - JOIN
 //   - WINDOW
+//   - CONST PROJECT
 // - UnSupport Ops::
 //   - CREATE TABLE
 //   - INSERT TABLE
@@ -475,9 +508,10 @@ bool Planner::IsTable(node::PlanNode *node, node::PlanNode** output) {
 // - Not Impl
 //   - Order By
 base::Status Planner::ValidateOnlineServingOp(node::PlanNode *node) {
-    CHECK_TRUE(nullptr != node, common::kNullInputPointer,
-               "Fail to validate request table: input node is "
-               "null")
+    if (node == nullptr) {
+        // null is fine, e.g the const project
+        return {};
+    }
     switch (node->type_) {
         case node::kPlanTypeProject: {
             auto project_node = dynamic_cast<node::ProjectPlanNode *>(node);
@@ -497,6 +531,8 @@ base::Status Planner::ValidateOnlineServingOp(node::PlanNode *node) {
         case node::kPlanTypeLimit:
         case node::kPlanTypeWindow:
         case node::kPlanTypeQuery:
+        case node::kPlanTypeFilter:
+        case node::kPlanTypeSetOperation:
         case node::kPlanTypeJoin: {
             break;
         }
@@ -547,10 +583,10 @@ int Planner::GetPlanTreeLimitCount(node::PlanNode *node) {
     return limit_cnt;
 }
 
+base::Status Planner::PreparePlanForRequestMode(node::PlanNode *node) { return ValidateOnlineServingOp(node); }
+
 // Un-support Ops:
-// - GROUP BY
-// - HAVING
-// - WINDOW
+// - Last Join
 //
 // Not Impl:
 // - Order By
@@ -559,25 +595,14 @@ base::Status Planner::ValidateClusterOnlineTrainingOp(node::PlanNode *node) {
         return base::Status::OK();
     }
     switch (node->type_) {
-        case node::kPlanTypeProject: {
-            auto project_node = dynamic_cast<node::ProjectPlanNode *>(node);
-
-            for (auto &each : project_node->project_list_vec_) {
-                node::ProjectListNode *project_list = dynamic_cast<node::ProjectListNode *>(each);
-                CHECK_TRUE(nullptr == project_list->GetW(), common::kPlanError,
-                           "Non-support WINDOW Op in cluster online training");
-                CHECK_TRUE(nullptr == project_list->GetHavingCondition(), common::kPlanError,
-                           "Non-support HAVING Op in cluster online training")
-                CHECK_TRUE(!project_list->HasAggProject(), common::kPlanError,
-                           "Aggregate over a table cannot be supported in cluster online training")
-            }
-            break;
-        }
+        case node::kPlanTypeProject:
+        case node::kPlanTypeGroup:
         case node::kPlanTypeTable:
         case node::kPlanTypeLoadData:
         case node::kPlanTypeRename:
         case node::kPlanTypeLimit:
         case node::kPlanTypeFilter:
+        case node::kPlanTypeSetOperation:
         case node::kPlanTypeQuery: {
             break;
         }
@@ -593,47 +618,38 @@ base::Status Planner::ValidateClusterOnlineTrainingOp(node::PlanNode *node) {
 
     return base::Status::OK();
 }
-/**
- * Validate there is one and only one request table existing in the Plan tree
- * @param node
- * @param outputs
- * @return
- */
-base::Status Planner::ValidateRequestTable(node::PlanNode *node, std::vector<node::PlanNode *>& outputs) {
+
+// extract request table plan node( always the first table plan node visited / the first LeafNode by DFS )
+// also set else table plan node requested by the request node
+base::Status Planner::PrepareRequestTable(node::PlanNode *node, std::vector<node::TablePlanNode *> &outputs) {
     CHECK_TRUE(nullptr != node, common::kNullInputPointer,
                "Fail to validate request table: input node is "
                "null")
 
     switch (node->type_) {
         case node::kPlanTypeJoin:
-        case node::kPlanTypeUnion: {
+        case node::kPlanTypeSetOperation: {
             auto binary_op = dynamic_cast<node::BinaryPlanNode *>(node);
-            CHECK_TRUE(nullptr != binary_op->GetLeft(), common::kPlanError, "Left child of ", node->GetTypeName(), " "
-                       "is null")
-            CHECK_STATUS(ValidateRequestTable(binary_op->GetLeft(), outputs))
+            CHECK_TRUE(nullptr != binary_op->GetLeft(), common::kPlanError, "Left child of ", node->GetTypeName(),
+                       " is null")
+            CHECK_STATUS(PrepareRequestTable(binary_op->GetLeft(), outputs))
             CHECK_TRUE(!outputs.empty(), common::kPlanError, "PLAN error: No request/primary table exist in left tree");
-            node::PlanNode *right_table = nullptr;
 
             // If right side is a table|simple select table|rename table
             // It isn't necessary to be validate request
-            if (IsTable(binary_op->GetRight(), &right_table)) {
-                // Collect table if it is equal with primary table node
-                if (node::PlanEquals(right_table, outputs[0])) {
-                    outputs.push_back(right_table);
-                }
-            } else {
-                CHECK_STATUS(ValidateRequestTable(binary_op->GetRight(), outputs))
+            auto res = IsTable(binary_op->GetRight());
+            if (!res.ok()) {
+                CHECK_STATUS(PrepareRequestTable(binary_op->GetRight(), outputs))
             }
             return base::Status::OK();
         }
         case node::kPlanTypeTable: {
+            // nodes inside with clause not verify, those nodes are checked later during physical plan transforming
+            // here we just mark the table node (probably reference to a CTE in WITH clause)
+            auto request_node = dynamic_cast<node::TablePlanNode *>(node);
             if (outputs.empty()) {
-                outputs.push_back(node);
-            } else {
-                // Validate there is only one request table existing in the plan tree
-                CHECK_TRUE(node::PlanEquals(node, outputs[0]), common::kPlanError,
-                           "Non-support multiple request tables")
-                outputs.push_back(node);
+                // first and only request node
+                outputs.push_back(request_node);
             }
             return base::Status::OK();
         }
@@ -646,8 +662,8 @@ base::Status Planner::ValidateRequestTable(node::PlanNode *node, std::vector<nod
             FAIL_STATUS(common::kPlanError, "Fail to infer a request table with invalid node", node->GetTypeName())
         }
         default: {
-            auto unary_op = dynamic_cast<const node::UnaryPlanNode *>(node);
-            CHECK_STATUS(ValidateRequestTable(unary_op->GetDepend(), outputs));
+            CHECK_TRUE(node->GetChildrenSize() > 0, common::kPlanError, "node do not have any kid");
+            CHECK_STATUS(PrepareRequestTable(node->GetChildren()[0], outputs));
             return base::Status::OK();
         }
     }
@@ -657,20 +673,12 @@ base::Status SimplePlanner::CreatePlanTree(const NodePointVector &parser_trees, 
     for (auto parser_tree : parser_trees) {
         switch (parser_tree->GetType()) {
             case node::kQuery: {
-                PlanNode *query_plan = nullptr;
+                node::QueryPlanNode *query_plan = nullptr;
                 CHECK_STATUS(CreateQueryPlan(dynamic_cast<node::QueryNode *>(parser_tree), &query_plan));
 
                 if (!is_batch_mode_) {
                     // Validate there is one and only request table in the SQL
-                    std::vector<::hybridse::node::PlanNode*> request_tables;
-                    CHECK_STATUS(ValidateRequestTable(query_plan, request_tables))
-                    CHECK_TRUE(!request_tables.empty(), common::kPlanError,
-                               "Invalid SQL for online serving: There ia no request table exist!")
-                    for (auto request_table : request_tables) {
-                        dynamic_cast<node::TablePlanNode *>(request_table)->SetIsPrimary(true);
-                    }
-
-                    CHECK_STATUS(ValidateOnlineServingOp(query_plan));
+                    CHECK_STATUS(PreparePlanForRequestMode(query_plan));
                 } else {
                     if (is_cluster_optimized_) {
                         CHECK_STATUS(ValidateClusterOnlineTrainingOp(query_plan));
@@ -704,7 +712,7 @@ base::Status SimplePlanner::CreatePlanTree(const NodePointVector &parser_trees, 
                 break;
             }
             case node::kInsertStmt: {
-                CHECK_TRUE(is_batch_mode_, common::kPlanError, "Non-support INSERT Op in online serving");
+                // CHECK_TRUE(is_batch_mode_, common::kPlanError, "Non-support INSERT Op in online serving");
                 node::PlanNode *insert_plan = nullptr;
                 CHECK_STATUS(CreateInsertPlan(parser_tree, &insert_plan))
                 plan_trees.push_back(insert_plan);
@@ -753,9 +761,37 @@ base::Status SimplePlanner::CreatePlanTree(const NodePointVector &parser_trees, 
                 plan_trees.push_back(deploy_plan_node);
                 break;
             }
+            case ::hybridse::node::kCreateUserStmt: {
+                auto node = dynamic_cast<node::CreateUserNode *>(parser_tree);
+                auto create_user_plan_node = node_manager_->MakeNode<node::CreateUserPlanNode>(node->Name(),
+                        node->IfNotExists(), node->Options());
+                plan_trees.push_back(create_user_plan_node);
+                break;
+            }
+            case ::hybridse::node::kGrantStmt: {
+                auto node = dynamic_cast<node::GrantNode *>(parser_tree);
+                auto grant_plan_node = node_manager_->MakeNode<node::GrantPlanNode>(
+                    node->TargetType(), node->Database(), node->Target(), node->Privileges(), node->IsAllPrivileges(),
+                    node->Grantees(), node->WithGrantOption());
+                plan_trees.push_back(grant_plan_node);
+                break;
+            }
+            case ::hybridse::node::kRevokeStmt: {
+                auto node = dynamic_cast<node::RevokeNode *>(parser_tree);
+                auto revoke_plan_node = node_manager_->MakeNode<node::RevokePlanNode>(
+                    node->TargetType(), node->Database(), node->Target(), node->Privileges(), node->IsAllPrivileges(),
+                    node->Grantees());
+                plan_trees.push_back(revoke_plan_node);
+                break;
+            }
+            case ::hybridse::node::kAlterUserStmt: {
+                auto node = dynamic_cast<node::AlterUserNode *>(parser_tree);
+                auto alter_user_plan_node = node_manager_->MakeNode<node::AlterUserPlanNode>(node->Name(),
+                        node->IfExists(), node->Options());
+                plan_trees.push_back(alter_user_plan_node);
+                break;
+            }
             case ::hybridse::node::kSetStmt: {
-                CHECK_TRUE(is_batch_mode_, common::kPlanError,
-                           "Non-support SET Op in online serving");
                 node::PlanNode *set_plan_node = nullptr;
                 CHECK_STATUS(CreateSetPlanNode(dynamic_cast<node::SetNode *>(parser_tree), &set_plan_node));
                 plan_trees.push_back(set_plan_node);
@@ -768,11 +804,39 @@ base::Status SimplePlanner::CreatePlanTree(const NodePointVector &parser_trees, 
                 plan_trees.push_back(delete_plan_node);
                 break;
             }
+            case ::hybridse::node::kShowStmt: {
+                auto show_node = dynamic_cast<const node::ShowNode*>(parser_tree);
+                CHECK_TRUE(show_node != nullptr, common::kPlanError, "not an ShowNode");
+                plan_trees.push_back(node_manager_->MakeNode<node::ShowPlanNode>(show_node->GetShowType(),
+                            show_node->GetTarget(), show_node->GetLikeStr()));
+                break;
+            }
             case ::hybridse::node::kCreateFunctionStmt: {
                 node::PlanNode *create_function_plan_node = nullptr;
                 CHECK_STATUS(CreateCreateFunctionPlanNode(dynamic_cast<node::CreateFunctionNode *>(parser_tree),
                             &create_function_plan_node));
                 plan_trees.push_back(create_function_plan_node);
+                break;
+            }
+            case ::hybridse::node::kAlterTableStmt: {
+                node::AlterTableStmtPlanNode* out = nullptr;
+                CHECK_STATUS(ConvertGuard<node::AlterTableStmt>(
+                    parser_tree, &out,
+                    [](const node::AlterTableStmt *from, node::NodeManager *nm, node::AlterTableStmtPlanNode **out) {
+                        *out = nm->MakeNode<node::AlterTableStmtPlanNode>(from->db_, from->table_, from->actions_);
+                        return base::Status::OK();
+                    }));
+                plan_trees.push_back(out);
+                break;
+            }
+            case ::hybridse::node::kCallStmt: {
+                node::CallStmtPlan *out = nullptr;
+                CHECK_STATUS(ConvertGuard<node::CallStmt>(
+                    parser_tree, &out, [](const node::CallStmt *from, node::NodeManager *nm, node::CallStmtPlan **out) {
+                        *out = nm->MakeNode<node::CallStmtPlan>(from->procedure_name(), from->arguments());
+                        return base::Status::OK();
+                    }));
+                plan_trees.push_back(out);
                 break;
             }
             default: {
@@ -901,7 +965,9 @@ base::Status Planner::CreateTableReferencePlanNode(const node::TableRefNode *roo
         }
         case node::kRefQuery: {
             const node::QueryRefNode *sub_query_node = dynamic_cast<const node::QueryRefNode *>(root);
-            CHECK_STATUS(CreateQueryPlan(sub_query_node->query_, &plan_node))
+            node::QueryPlanNode* query = nullptr;
+            CHECK_STATUS(CreateQueryPlan(sub_query_node->query_, &query))
+            plan_node = query;
             if (!sub_query_node->alias_table_name_.empty()) {
                 *output = node_manager_->MakeRenamePlanNode(plan_node, sub_query_node->alias_table_name_);
             } else {
@@ -1067,13 +1133,13 @@ bool Planner::ExpandCurrentHistoryWindow(std::vector<const node::WindowDefNode *
             node::FrameNode *current_frame = node_manager_->MergeFrameNodeWithCurrentHistoryFrame(w_ptr->GetFrame());
             *iter = dynamic_cast<node::WindowDefNode *>(node_manager_->MakeWindowDefNode(
                 w_ptr->union_tables(), w_ptr->GetPartitions(), w_ptr->GetOrders(), current_frame,
-                w_ptr->exclude_current_time(), w_ptr->exclude_current_row(), w_ptr->instance_not_in_window()));
+                w_ptr->exclude_current_time(), w_ptr->instance_not_in_window()));
             has_window_expand = true;
         }
     }
     return has_window_expand;
 }
-
+// TODO(hw): unused
 base::Status Planner::TransformTableDef(const std::string &table_name, const NodePointVector &column_desc_list,
                                         type::TableDef *table) {
     std::set<std::string> index_names;
@@ -1126,12 +1192,13 @@ base::Status Planner::TransformTableDef(const std::string &table_name, const Nod
                                     node::DataTypeName(column_def->GetColumnType()), " is not supported")
                     }
                 }
+
+                column->mutable_schema()->set_base_type(column->type());
                 break;
             }
 
             case node::kColumnIndex: {
                 node::ColumnIndexNode *column_index = static_cast<node::ColumnIndexNode *>(column_desc);
-
                 if (column_index->GetName().empty()) {
                     column_index->SetName(PlanAPI::GenerateName("INDEX", table->indexes_size()));
                 }
@@ -1204,10 +1271,10 @@ absl::StatusOr<node::WindowDefNode *> Planner::ConstructWindowForLag(const node:
     new_frame->SetFrameRows(rows_frame_ext);
     new_frame->SetFrameRange(nullptr);
     new_frame->set_frame_maxsize(0);
+    // EXCLUDE CURRENT_ROW does not apply to lag
+    new_frame->exclude_current_row_ = false;
 
     auto *new_win = in->ShadowCopy(node_manager_);
-    // EXCLUDE CURRENT_ROW does not apply to lag
-    new_win->set_exclude_current_row(false);
     new_win->SetFrame(new_frame);
     return new_win;
 }

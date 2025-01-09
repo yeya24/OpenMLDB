@@ -21,10 +21,13 @@
 
 #include <string>
 
-#include "sdk/base.h"
+#include "sdk/base_schema.h"
 
 namespace hybridse {
 namespace sdk {
+
+typedef char* ByteArrayPtr;
+
 struct Date {
     int32_t year;
     int32_t month;
@@ -48,7 +51,7 @@ class ResultSet {
         return val;
     }
 
-    const bool GetAsString(uint32_t idx, std::string& val) {  // NOLINT
+    virtual const bool GetAsString(uint32_t idx, std::string& val) {  // NOLINT
         if (nullptr == GetSchema()) {
             return false;
         }
@@ -235,6 +238,9 @@ class ResultSet {
     virtual bool IsNULL(int index) = 0;
 
     virtual int32_t Size() = 0;
+
+    virtual void CopyTo(hybridse::sdk::ByteArrayPtr buf) = 0;
+    virtual int32_t GetDataLength() = 0;
 };
 
 }  // namespace sdk

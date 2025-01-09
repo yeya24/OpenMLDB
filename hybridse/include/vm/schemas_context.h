@@ -58,7 +58,8 @@ class SchemaSource {
     size_t size() const;
     void Clear();
 
-    std::string ToString() const;
+    std::string DebugString() const;
+    friend std::ostream& operator<<(std::ostream& os, const SchemaSource& sc) { return os << sc.DebugString(); }
 
  private:
     bool CheckSourceSetIndex(size_t idx) const;
@@ -71,11 +72,19 @@ class SchemaSource {
     // column identifier of each output column
     std::vector<size_t> column_ids_;
 
-    // trace which child and which column id each column come from
+    // trace which child and which column id each column comes from, index is measured
+    // based on the physical node tree, starts from 0.
     // -1 means the column is created from current node
     std::vector<int> source_child_idxs_;
     std::vector<size_t> source_child_column_ids_;
 };
+
+// backtrace info for column in current node to producer nodes
+// [(producer index, producer column id)]
+typedef std::vector<std::pair<int, size_t>> ColProducerTraceInfo;
+
+// [(source node, source column id)]
+typedef std::vector<std::pair<const PhysicalOpNode*, size_t>> ColLastDescendantTraceInfo;
 
 /**
  * Utility context to resolve column spec into detailed column information.
@@ -126,10 +135,6 @@ class SchemasContext {
     base::Status ResolveColumnRefIndex(const node::ColumnRefNode* column_ref,
                                        size_t* schema_idx,
                                        size_t* col_idx) const;
-    /**
-     * Resolve column id with given column expression [ColumnRefNode, ColumnId]
-     */
-    base::Status ResolveColumnID(const node::ExprNode* column, size_t* column_id) const;
 
     /**
      * Given relation name and column name, return column unique id
@@ -142,16 +147,13 @@ class SchemasContext {
 
     /**
      * Resolve source column by relation name and column name recursively.
-     * If it can be resolved in current node, `child_path_id` is -1,
-     * else `child_path_id` is the index of the child which the column
+     * If it can't be resolved in current node, `child_path_idx` is -1,
+     * otherwise `child_path_idx` is the index of the child which the column
      * is resolved from.
      */
-    base::Status ResolveColumnID(const std::string& db_name,
-                                 const std::string& relation_name,
-                                 const std::string& column_name,
-                                 size_t* column_id, int* child_path_idx,
-                                 size_t* child_column_id,
-                                 size_t* source_column_id,
+    base::Status ResolveColumnID(const std::string& db_name, const std::string& relation_name,
+                                 const std::string& column_name, size_t* column_id, int* child_path_idx,
+                                 size_t* child_column_id, size_t* source_column_id,
                                  const PhysicalOpNode** source_node) const;
 
     /**
@@ -206,6 +208,8 @@ class SchemasContext {
      * Set the defautl database name
      */
     void SetDefaultDBName(const std::string& default_db_name);
+
+    const std::string& GetDefaultDBName() const { return default_db_name_; }
     /**
      * Add new schema source and return the mutable instance of added source.
      */
@@ -213,6 +217,7 @@ class SchemasContext {
 
     /**
      * Add schema sources from child and inherit column identifiers.
+     * New source is appended to the back.
      */
     void Merge(size_t child_idx, const SchemasContext* child);
 
@@ -243,6 +248,13 @@ class SchemasContext {
     void BuildTrivial(const std::vector<const codec::Schema*>& schemas);
     void BuildTrivial(const std::string& default_db, const std::vector<const type::TableDef*>& tables);
 
+    // {db}.{table}({col_name}:{col_type}, ...)
+    std::string ReadableString() const { return ""; }
+
+    std::string DebugString() const;
+
+    friend std::ostream& operator<<(std::ostream& os, const SchemasContext& sc) { return os << sc.DebugString(); }
+
  private:
     bool IsColumnAmbiguous(const std::string& column_name) const;
 
@@ -261,7 +273,7 @@ class SchemasContext {
     std::map<std::string, std::vector<std::pair<size_t, size_t>>> column_name_map_;
 
     // child source mapping
-    // child idx -> (child column id -> column idx)
+    // child idx -> (child column id (in child node) -> column id (in current node))
     std::map<size_t, std::map<size_t, size_t>> child_source_map_;
 
     // schema source parts
@@ -301,6 +313,8 @@ class RowParser {
     const SchemasContext* schema_ctx_ = nullptr;
     std::vector<codec::RowView> row_view_list_;
 };
+
+base::Status DoSearchExprDependentColumns(const node::ExprNode* expr, std::vector<const node::ExprNode*>* columns);
 
 }  // namespace vm
 }  // namespace hybridse

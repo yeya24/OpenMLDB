@@ -5,10 +5,15 @@ Maintenance
 .. toctree::
     :maxdepth: 1
 
-    upgrade
+    restart
+    update_conf
     backup
-    monitoring
-    cli
-    faq
     scale
+    monitoring
+    perf_guide
+    upgrade
+    cli
+    status
+    multi_cluster
     diagnose
+    openmldb_ops
